@@ -85,7 +85,11 @@ flowchart LR
 
 1. `Assets/Scripts/EventHub/` klasörünü projene kopyala (Runtime + Editor).
 2. **Bağımlılık:** Inspector'da `IEventPayload` tiplerini çok biçimli göstermek için
-   [MackySoft.SerializeReferenceExtensions](https://github.com/mackysoft/SerializeReferenceExtensions) (`SubclassSelector`) gerekir.
+   [MackySoft.SerializeReferenceExtensions](https://github.com/mackysoft/Unity-SerializeReferenceExtensions) (`SubclassSelector`) gerekir.
+   Bu depoda zaten `Packages/manifest.json` üzerinden UPM git bağımlılığı olarak gelir, elle kurulum gerekmez:
+   ```json
+   "com.mackysoft.serializereference-extensions": "https://github.com/mackysoft/Unity-SerializeReferenceExtensions.git?path=Assets/MackySoft/MackySoft.SerializeReferenceExtensions#1.7.0"
+   ```
 3. `Assets/Resources/` altında **Create → Architecture → Event Database** ile bir `EventDatabase` asset'i oluştur. (Dosya adı tam olarak `EventDatabase` olmalı; motor `Resources.Load<EventDatabase>("EventDatabase")` ile bulur.)
 
 ---
