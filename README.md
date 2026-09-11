@@ -28,6 +28,7 @@ if (EventHub.TryGet<int>("Combat/Player/OnTakeDamage", out int sonHasar)) { /* .
 - [Durum ve Kalıcılık](#durum-ve-kalıcılık)
 - [Sahne Yaşam Döngüsü](#sahne-yaşam-döngüsü)
 - [Editör Araçları](#editör-araçları)
+- [Doğrulama](#doğrulama)
 - [Tasarım Kararları](#tasarım-kararları)
 - [Sınırlar ve Notlar](#sınırlar-ve-notlar)
 - [Dosya Yapısı](#dosya-yapısı)
@@ -243,6 +244,25 @@ Kalıcılık, `EventDatabase`'deki `isPersistent` bayrağından veya çalışma 
 | **Event Channel Dropdown** | Diğer inspector alanları | `[EventPublisher]`/`[EventListener]` alanlarında tipe göre filtrelenmiş kanal seçimi. |
 | **Event Matrix** | `Tools → Architecture → Event Matrix` | Canlı matris: kim yayınlıyor, kim dinliyor, kanalın anlık değeri ve kalıcılık durumu. |
 | **Event Audit** | `Tools → Architecture → Event Audit` | Play'e girmeden statik denetim: prefab + ScriptableObject + açık sahnelerdeki tüm bağlamaları veritabanıyla karşılaştırır (boş kanal, tip uyuşmazlığı, çakışma, tanımsız kanal). |
+| **Persistence Check** | `Tools/EventHubChecks/` | Derleme + çalıştırma kontrolü (bkz. [Doğrulama](#doğrulama)). |
+
+---
+
+## Doğrulama
+
+Depoda çalıştırılabilir bir kontrol vardır:
+
+```bash
+Tools/EventHubChecks/run_persistence_check.sh
+```
+
+Çıktı: `ALL OK` veya `FAIL` satırları. Unity'nin ürettiği `.csproj`'a bağımlı değildir; EventHub runtime
+kaynaklarını doğrudan derler. Kritik özellik: derleme **`UNITY_EDITOR` tanımlı olmadan** yapılır, yani
+player build derlemesini de taklit eder. Editörde `UNITY_EDITOR` her zaman tanımlı olduğu için
+"guard içinde tanımlı, dışında kullanılan" üyeler Unity'de görünmez ve build'de kırılır; bu script onu yakalar.
+
+Kapsam: kalıcılık geçersiz kılmaları, `Set` sırasında durum tipi değişimi, `ResetTransientStates`
+davranışı. Görsel/etkileşimli doğrulama için `Event Audit` penceresi ve Unity konsolu kullanılır.
 
 ---
 
@@ -253,14 +273,15 @@ Kalıcılık, `EventDatabase`'deki `isPersistent` bayrağından veya çalışma 
 - **Ölü obje zırhı:** `Destroy` edilmiş `UnityEngine.Object` abonelikleri dağıtım sırasında sessizce sökülür.
 - **İstisna kalkanı:** bir dinleyici hata fırlatsa bile diğerleri çalışmaya devam eder (`try/catch` + `LogException`).
 - **Void ve generic ayrımı:** parametresiz olaylar boxing yapmaz, ayrı tip-güvenli yol.
-- **Sözleşme denetimi yalnızca editörde:** yayın/abonelik sırasında veritabanıyla tip karşılaştırması yapılır; build'de sıfır maliyet.
+- **Sözleşme denetimi yalnızca editörde:** yayın/abonelik sırasında veritabanıyla tip karşılaştırması yapılır; build'de sıfır maliyet. Editör-only kod (`#if UNITY_EDITOR`) yalnızca çağrı yerleri de guard'lıysa kullanılır; korumasız çağrı player build'i kırar.
+- **Liste serileştirilir, aramalar sözlükte:** `EventDatabase.events` düz `List` olarak kalır (Unity `Dictionary` serialize edemez); aramalar için `FullPath → tanım` indeksi ilk kullanımda kurulur ve liste değiştiğinde kendini yeniler. Böylece inspector, sıralama ve çakışma tespiti korunurken arama `O(1)` olur.
 
 ---
 
 ## Sınırlar ve Notlar
 
-- Kanal anahtarları **string**'dir; derleme zamanında doğrulanmaz. Editörde sözleşme denetimi çalışır, ama build'de yazım hataları sessiz kalır. Ölçek büyüyünce `const string` kanal sabitleri veya kod üretimi önerilir.
-- `EventDatabase` aramaları lineer `List.Find` ile yapılır; çok sayıda kanalda bir `Dictionary` indeksi daha uygun olur.
+- Kanal anahtarları **string**'dir; derleme zamanında doğrulanmaz. Güvenlik **editörde** kurulur: kanal alanları `[EventPublisher]`/`[EventListener]` ile tipe göre filtrelenmiş açılır listeden seçilir ve `Event Audit` yanlış bağlamaları build almadan yakalar. Kanal sabitleri üretmek kasıtlı olarak tercih edilmez; amaç kanal seçiminin koddan değil inspector'dan yapılmasıdır.
+- `EventDatabase` içinde aynı yol birden fazla tanımlıysa **ilki** geçerlidir (sözlük indeksi ilk kaydı tutar). Böyle bir çakışma sessizce yutulmaz; `Event Audit` "çakışma" olarak raporlar.
 - `Event Audit` yalnızca **prefab'ları, ScriptableObject'leri ve o an açık olan sahneleri** tarar; kapalı sahne dosyaları kapsam dışıdır (dosyayı bozmadan okumanın güvenli bir yolu yok). Ayrıca bir kanalın "kullanılmıyor" görünmesi problem değildir: obje henüz spawn olmamış veya bilerek bağlanmamış olabilir.
 - Sistem **tek bir global static** hub'dır; birden çok izole bus veya test izolasyonu hedeflenmemiştir.
 - `SetPersistent` geçersiz kılmaları editör play modundan çıkışta temizlenir.
@@ -288,6 +309,10 @@ Assets/Scripts/EventHub/
     ├── CombatAttacker.cs      # Örnek üretici
     ├── HealthUIController.cs  # Örnek MonoBehaviour dinleyici
     └── DamageAudioEffectSO.cs # Örnek ScriptableObject dinleyici
+
+Tools/EventHubChecks/
+├── PersistenceCheck.cs           # Çalıştırılabilir kalıcılık kontrolü
+└── run_persistence_check.sh      # Derler ve çalıştırır (UNITY_EDITOR'siz)
 ```
 
 ---
