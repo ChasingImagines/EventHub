@@ -59,6 +59,9 @@ public static class EventHub
     // Event Matrix editör penceresinin anlık nabız (pulse) yakalaması için delegasyon
     public static event Action<string> OnEventRaisedInEditor;
 
+    // Raise her karede çağrılabildiği için uyarı kanal başına yalnızca bir kez basılır
+    private static readonly HashSet<string> _warnedUndefinedChannels = new();
+
     [UnityEditor.InitializeOnLoadMethod]
     private static void InitEditorLifecycle()
     {
@@ -74,6 +77,7 @@ public static class EventHub
             _subscriptions.Clear();
             _states.Clear();
             _persistenceOverrides.Clear();
+            _warnedUndefinedChannels.Clear();
         }
     }
 #endif
@@ -85,6 +89,9 @@ public static class EventHub
         _subscriptions.Clear();
         _states.Clear();
         _persistenceOverrides.Clear();
+#if UNITY_EDITOR
+        _warnedUndefinedChannels.Clear();
+#endif
     }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -158,24 +165,31 @@ public static class EventHub
 #if UNITY_EDITOR
         // 1. SÖZLEŞME DENETİMİ (Veritabanı ile tip eşleşmesi doğrulaması)
         var db = EventDatabase.Instance;
-        if (db != null && db.TryGetExpectedType(eventName, out Type expected))
+        if (db != null)
         {
-            if (expected == typeof(void))
+            if (!db.TryGetExpectedType(eventName, out Type expected))
             {
-                Debug.LogError(
-                    $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' veritabanında <b>VOID (Parametresiz)</b> tanımlanmış!\n" +
-                    $"Ancak koddan <i>{typeof(T).Name}</i> fırlatıldı.",
-                    sender
-                );
-                return;
+                WarnUndefinedChannel(eventName, sender);
             }
-            if (expected != typeof(T))
+            else
             {
-                Debug.LogError(
-                    $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' veritabanında <b>{expected.Name}</b> beklerken, koddan <i>{typeof(T).Name}</i> fırlatıldı!",
-                    sender
-                );
-                return;
+                if (expected == typeof(void))
+                {
+                    Debug.LogError(
+                        $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' veritabanında <b>VOID (Parametresiz)</b> tanımlanmış!\n" +
+                        $"Ancak koddan <i>{typeof(T).Name}</i> fırlatıldı.",
+                        sender
+                    );
+                    return;
+                }
+                if (expected != typeof(T))
+                {
+                    Debug.LogError(
+                        $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' veritabanında <b>{expected.Name}</b> beklerken, koddan <i>{typeof(T).Name}</i> fırlatıldı!",
+                        sender
+                    );
+                    return;
+                }
             }
         }
 #endif
@@ -291,14 +305,21 @@ public static class EventHub
 
 #if UNITY_EDITOR
         var db = EventDatabase.Instance;
-        if (db != null && db.TryGetExpectedType(eventName, out Type expected) && expected != typeof(void))
+        if (db != null)
         {
-            Debug.LogError(
-                $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' olayı veritabanında <b>{expected.Name}</b> bekliyor!\n" +
-                $"Ancak parametresiz Raise() çağrıldı.",
-                sender
-            );
-            return;
+            if (!db.TryGetExpectedType(eventName, out Type expected))
+            {
+                WarnUndefinedChannel(eventName, sender);
+            }
+            else if (expected != typeof(void))
+            {
+                Debug.LogError(
+                    $"<b>[EventHub Sözleşme Hatası]</b> '{eventName}' olayı veritabanında <b>{expected.Name}</b> bekliyor!\n" +
+                    $"Ancak parametresiz Raise() çağrıldı.",
+                    sender
+                );
+                return;
+            }
         }
 #endif
 
@@ -554,7 +575,12 @@ public static class EventHub
         var db = EventDatabase.Instance;
         if (db == null) return true;
 
-        if (!db.TryGetExpectedType(eventName, out Type expected)) return true;
+        if (!db.TryGetExpectedType(eventName, out Type expected))
+        {
+            // Kanal veritabanında yok: yazım hatası ya da eski projeden taşınmış bağlantı olabilir.
+            WarnUndefinedChannel(eventName, context);
+            return true;
+        }
 
         if (expected != attemptingType)
         {
@@ -568,6 +594,20 @@ public static class EventHub
         }
 
         return true;
+    }
+
+    // EventDatabase'de tanımlı olmayan kanal uyarısı (yalnızca editör; kanal başına bir kez).
+    private static void WarnUndefinedChannel(string eventName, UnityEngine.Object context)
+    {
+        if (string.IsNullOrEmpty(eventName)) return;
+        if (!_warnedUndefinedChannels.Add(eventName)) return;
+
+        Debug.LogWarning(
+            $"<b>[EventHub]</b> '{eventName}' kanalı <b>EventDatabase</b>'de tanımlı değil.\n" +
+            "• Yayın/abonelik çalışır, ama tip denetimi ve editör araçları bu kanalı göremez.\n" +
+            "• Kanalı Event Database'e ekle; isim yazım hatası ya da eski projeden taşınmış bir bağlantı olabilir.",
+            context
+        );
     }
 #endif
 
