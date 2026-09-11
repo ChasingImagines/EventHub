@@ -238,6 +238,7 @@ Kalıcılık, `EventDatabase`'deki `isPersistent` bayrağından veya çalışma 
 | **Event Database** | `EventDatabase` asset inspector | Kanalları grup ağacı olarak gösterir, arama/filtre, çakışma uyarısı, ekle/sil. |
 | **Event Channel Dropdown** | Diğer inspector alanları | `[EventPublisher]`/`[EventListener]` alanlarında tipe göre filtrelenmiş kanal seçimi. |
 | **Event Matrix** | `Tools → Architecture → Event Matrix` | Canlı matris: kim yayınlıyor, kim dinliyor, kanalın anlık değeri ve kalıcılık durumu. |
+| **Event Audit** | `Tools → Architecture → Event Audit` | Play'e girmeden statik denetim: prefab + ScriptableObject + açık sahnelerdeki tüm bağlamaları veritabanıyla karşılaştırır (boş kanal, tip uyuşmazlığı, çakışma, tanımsız kanal). |
 
 ---
 
@@ -256,6 +257,7 @@ Kalıcılık, `EventDatabase`'deki `isPersistent` bayrağından veya çalışma 
 
 - Kanal anahtarları **string**'dir; derleme zamanında doğrulanmaz. Editörde sözleşme denetimi çalışır, ama build'de yazım hataları sessiz kalır. Ölçek büyüyünce `const string` kanal sabitleri veya kod üretimi önerilir.
 - `EventDatabase` aramaları lineer `List.Find` ile yapılır; çok sayıda kanalda bir `Dictionary` indeksi daha uygun olur.
+- `Event Audit` yalnızca **prefab'ları, ScriptableObject'leri ve o an açık olan sahneleri** tarar; kapalı sahne dosyaları kapsam dışıdır (dosyayı bozmadan okumanın güvenli bir yolu yok). Ayrıca bir kanalın "kullanılmıyor" görünmesi problem değildir: obje henüz spawn olmamış veya bilerek bağlanmamış olabilir.
 - Sistem **tek bir global static** hub'dır; birden çok izole bus veya test izolasyonu hedeflenmemiştir.
 - `SetPersistent` geçersiz kılmaları editör play modundan çıkışta temizlenir.
 
@@ -274,9 +276,10 @@ Assets/Scripts/EventHub/
 │   ├── EventHubSO.cs          # SO dinleyici iskeleti
 │   └── IEventHubListener.cs   # SO/sınıf dinleyici arayüzü
 ├── Editor/
-│   ├── EventChannelDrawer.cs  # Tipli kanal açılır menüsü
-│   ├── EventMatrixWindow.cs   # Canlı olay matrisi
-│   └── EventDatabaseEditor.cs # Gruplu, aranabilir veritabanı inspector'ı
+│   ├── EventChannelDrawer.cs   # Tipli kanal açılır menüsü
+│   ├── EventMatrixWindow.cs    # Canlı olay matrisi
+│   ├── EventDatabaseEditor.cs  # Gruplu, aranabilir veritabanı inspector'ı
+│   └── EventAuditWindow.cs     # Play'siz statik bağlama denetimi
 └── Test/
     ├── CombatAttacker.cs      # Örnek üretici
     ├── HealthUIController.cs  # Örnek MonoBehaviour dinleyici
