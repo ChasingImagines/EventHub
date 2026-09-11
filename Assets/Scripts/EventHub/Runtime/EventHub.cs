@@ -569,7 +569,9 @@ public static class EventHub
 
         return true;
     }
+#endif
 
+    // Hata mesajlarında kullanılır ve build'de de derlenmek zorundadır (runtime hata raporu).
     private static string GetListenersInfo(List<Delegate> list)
     {
         if (list == null || list.Count == 0) return "   (Kayıtlı dinleyici yok)";
@@ -588,7 +590,6 @@ public static class EventHub
         }
         return report;
     }
-#endif
 
     #endregion
 }
