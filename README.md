@@ -54,30 +54,6 @@ EventHub bu üçünü birleştirir:
 | Sahne geçişleri | Sadece geçici (transient) durumlar temizlenir; kalıcı kanallar korunur |
 | Performans | Kanal başına `List<Delegate>`, ters döngü, sıfıra yakın GC alloc |
 
-### ScriptableObject event kanalları ile karşılaştırma
-
-Unity'de yaygın alternatif, her olayı bir `ScriptableObject` asset'i olarak tanımlamaktır
-(`IntEventChannel`, `VoidEventChannel` …): dinleyici asset referansını tutar, `OnEnable`/`OnDisable`
-ile kaydolur. İkisi de gevşek bağlılık sağlar, ama farklı eksenlerde güçlüdür:
-
-| | SO event kanalı | EventHub |
-|---|---|---|
-| Kanal tanımı | Kanal başına ayrı asset | Tek `EventDatabase` içinde satır |
-| Bağlama | Inspector'da asset referansı | İsimden seçilen kanal (string) |
-| Tip güvenliği | Derleme zamanı (generic SO tipi) | Editör zamanı (veritabanı denetimi + filtreli liste) |
-| Geç abone olan dinleyici | Olayı kaçırır (durum yok) | Son değeri hafızadan okur |
-| Durum / kalıcılık | Kanal SO'suna elle alan + sıfırlama politikası | Yerleşik blackboard + `isPersistent` |
-| Merkezi görünürlük | Yok; asset asset dolaşmak gerekir | Event Database + Event Matrix + Event Audit |
-| Ölü abonelik | `OnDisable` unutulursa sızar | `Raise` sırasında otomatik budanır |
-| Ölçek | 50 kanal = 50 asset | Tek asset, 50 satır |
-| İzole/çoklu bus, test izolasyonu | Kolay (asset'i kopyala, örnekle) | Yok; tek global static |
-| Ek kod | Payload başına kanal sınıfı | Hazır payload tipleri |
-
-Kısa karar rehberi: kanal sayısı artıyor, "son değer" önemli ya da geç açılan sahneler olayı
-kaçırmamalıysa EventHub; bağlantıların tamamen inspector'da görünmesini ve derleme zamanı tip
-güvenliğini istiyorsan SO kanalları daha uygun. İkisi birlikte de kullanılabilir (asılı kalma riski:
-aynı kanalın iki farklı mekanizmayla temsil edilmesi).
-
 ---
 
 ## Mimari
