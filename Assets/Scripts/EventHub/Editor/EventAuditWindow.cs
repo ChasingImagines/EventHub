@@ -14,7 +14,7 @@ using UnityEngine.SceneManagement;
 /// </summary>
 public class EventAuditWindow : EditorWindow
 {
-    private enum Severity { Error, Warning, Info }
+    private enum Severity { Error, Warning }
 
     private class Finding
     {
@@ -40,7 +40,6 @@ public class EventAuditWindow : EditorWindow
     private readonly Dictionary<Type, List<ChannelField>> _fieldCache = new();
 
     private Vector2 _scroll;
-    private bool _onlyProblems = true;
     private bool _hasScanned;
     private string _status = "Tara düğmesine bas.";
 
@@ -68,19 +67,14 @@ public class EventAuditWindow : EditorWindow
 
         int errors = _findings.Count(f => f.Severity == Severity.Error);
         int warnings = _findings.Count(f => f.Severity == Severity.Warning);
-        int infos = _findings.Count(f => f.Severity == Severity.Info);
 
-        if (errors == 0 && warnings == 0 && (!_onlyProblems || infos == 0))
+        if (errors == 0 && warnings == 0)
         {
             EditorGUILayout.HelpBox("Aktif bulgu yok. 👍", MessageType.Info);
         }
 
         DrawSection("HATALAR", Severity.Error, errors);
-
-        if (!_onlyProblems || warnings > 0)
-            DrawSection("UYARILAR", Severity.Warning, warnings);
-
-        DrawSection("BİLGİ", Severity.Info, infos);
+        DrawSection("UYARILAR", Severity.Warning, warnings);
 
         EditorGUILayout.Space(8);
         DrawChannelSummary();
@@ -95,8 +89,6 @@ public class EventAuditWindow : EditorWindow
         if (GUILayout.Button("Tara", EditorStyles.toolbarButton, GUILayout.Width(60)))
             Scan();
 
-        _onlyProblems = GUILayout.Toggle(_onlyProblems, "Kısa liste", EditorStyles.toolbarButton, GUILayout.Width(75));
-
         GUILayout.FlexibleSpace();
 
         var db = EventDatabase.Instance;
@@ -110,12 +102,10 @@ public class EventAuditWindow : EditorWindow
     {
         int errors = _findings.Count(f => f.Severity == Severity.Error);
         int warnings = _findings.Count(f => f.Severity == Severity.Warning);
-        int infos = _findings.Count(f => f.Severity == Severity.Info);
 
         EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
         Badge($"{errors} hata", errors > 0 ? new Color(1f, 0.5f, 0.5f) : Color.grey);
         Badge($"{warnings} uyarı", warnings > 0 ? new Color(1f, 0.8f, 0.4f) : Color.grey);
-        Badge($"{infos} bilgi", Color.grey);
         GUILayout.FlexibleSpace();
         EditorGUILayout.EndHorizontal();
     }
@@ -147,8 +137,7 @@ public class EventAuditWindow : EditorWindow
         string icon = f.Severity switch
         {
             Severity.Error => "<color=#FF5555>✖</color>",
-            Severity.Warning => "<color=#FFB347>▲</color>",
-            _ => "<color=grey>●</color>",
+            _ => "<color=#FFB347>▲</color>",
         };
 
         var rich = new GUIStyle(EditorStyles.label) { richText = true };
@@ -338,11 +327,6 @@ public class EventAuditWindow : EditorWindow
                 int lis = list?.Count(b => !b.IsPublisher) ?? 0;
 
                 _channelSummary.Add((ev.FullPath, pub, lis, true, ev.isPersistent));
-
-                if (pub == 0)
-                    Add(Severity.Info, ev.FullPath, "Hiç tetikleyici (publisher) yok", "", null);
-                if (lis == 0)
-                    Add(Severity.Info, ev.FullPath, "Hiç dinleyici (listener) yok", "", null);
             }
         }
 
