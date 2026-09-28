@@ -349,7 +349,6 @@ public class EventMatrixWindow : EditorWindow
 
     private void DrawGroupedTargets(List<UnityEngine.Object> targets, string foldoutKeyPrefix)
     {
-        // Hedefleri EventGroup yoluna göre gruplandır
         var groups = new Dictionary<string, List<UnityEngine.Object>>();
         var ungrouped = new List<UnityEngine.Object>();
 
@@ -383,23 +382,14 @@ public class EventMatrixWindow : EditorWindow
             }
         }
 
-        // 1. Gruplanmış Nesneleri Çiz (EventGroup olan klonlar/nesneler)
+        // 1. Gruplanmış Nesneler (Gereksiz "Seç" butonu kaldırıldı, sade foldout yapıldı)
         foreach (var (groupName, list) in groups)
         {
             string foldoutKey = $"{foldoutKeyPrefix}_{groupName}";
             bool open = _foldoutStates.TryGetValue(foldoutKey, out bool v) && v;
 
-            EditorGUILayout.BeginHorizontal();
             open = EditorGUILayout.Foldout(open, $"🏷️ {groupName} <color=grey>({list.Count})</color>", true, new GUIStyle(EditorStyles.foldout) { richText = true });
             _foldoutStates[foldoutKey] = open;
-
-            if (GUILayout.Button("Seç", EditorStyles.miniButton, GUILayout.Width(35)))
-            {
-                var pingTarget = (list[0] is Component c) ? c.gameObject : list[0];
-                EditorGUIUtility.PingObject(pingTarget);
-                Selection.activeObject = pingTarget;
-            }
-            EditorGUILayout.EndHorizontal();
 
             if (open)
             {
@@ -412,13 +402,12 @@ public class EventMatrixWindow : EditorWindow
             }
         }
 
-        // 2. Grubu Olmayan Bağımsız Nesneleri Çiz
+        // 2. Grubu Olmayan Nesneler
         for (int i = 0; i < ungrouped.Count; i++)
         {
             DrawTargetObject(ungrouped[i]);
         }
     }
-
     private void DrawTargetObject(UnityEngine.Object target)
     {
         if (target == null) return;
