@@ -7,11 +7,6 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-/// <summary>
-/// Play'e girmeden, sahneler + prefab'lar + ScriptableObject'ler üzerindeki tüm
-/// EventPublisher/EventListener bağlamalarını EventDatabase ile karşılaştırır.
-/// Amaç: kod yazmadan, inspector'dan kurulan akışın editörde güvenli kalması.
-/// </summary>
 public class EventAuditWindow : EditorWindow
 {
     private enum Severity { Error, Warning }
@@ -23,6 +18,7 @@ public class EventAuditWindow : EditorWindow
         public string Message;
         public string Where;
         public UnityEngine.Object Context;
+        public Type MissingType;
     }
 
     private class Binding
@@ -33,21 +29,22 @@ public class EventAuditWindow : EditorWindow
         public string FieldName;
         public string Where;
         public UnityEngine.Object Context;
+        public bool IsPrefab;
     }
 
     private readonly List<Finding> _findings = new();
-    private readonly List<(string channel, int pub, int lis, bool known, bool persistent)> _channelSummary = new();
+    private readonly List<(string channel, int pub, int lis, bool known, bool persistent, string defVal)> _channelSummary = new();
     private readonly Dictionary<Type, List<ChannelField>> _fieldCache = new();
 
     private Vector2 _scroll;
     private bool _hasScanned;
-    private string _status = "Tara düğmesine bas.";
+    private string _status = "Tara butonuna basınız.";
 
     [MenuItem("Tools/Architecture/Event Audit")]
     private static void Open()
     {
         var win = GetWindow<EventAuditWindow>("Event Audit");
-        win.minSize = new Vector2(520, 320);
+        win.minSize = new Vector2(560, 340);
     }
 
     private void OnGUI()
@@ -56,8 +53,8 @@ public class EventAuditWindow : EditorWindow
 
         if (!_hasScanned)
         {
-            EditorGUILayout.Space(6);
-            EditorGUILayout.HelpBox("Play moduna girmeden tüm kanal bağlamalarını denetlemek için \"Tara\".", MessageType.Info);
+            EditorGUILayout.Space(10);
+            EditorGUILayout.HelpBox("Sahne, prefab ve ScriptableObject'lerdeki olay sözleşmelerini denetlemek için 'Tara' butonuna basınız.", MessageType.Info);
             return;
         }
 
@@ -70,13 +67,13 @@ public class EventAuditWindow : EditorWindow
 
         if (errors == 0 && warnings == 0)
         {
-            EditorGUILayout.HelpBox("Aktif bulgu yok. 👍", MessageType.Info);
+            EditorGUILayout.HelpBox("Tebrikler! Hiçbir eksik veya uyumsuz olay bağlaması bulunamadı. 👍", MessageType.Info);
         }
 
         DrawSection("HATALAR", Severity.Error, errors);
         DrawSection("UYARILAR", Severity.Warning, warnings);
 
-        EditorGUILayout.Space(8);
+        EditorGUILayout.Space(10);
         DrawChannelSummary();
 
         EditorGUILayout.EndScrollView();
@@ -86,13 +83,13 @@ public class EventAuditWindow : EditorWindow
     {
         EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
-        if (GUILayout.Button("Tara", EditorStyles.toolbarButton, GUILayout.Width(60)))
+        if (GUILayout.Button("🔍 Projeyi Tara", EditorStyles.toolbarButton, GUILayout.Width(100)))
             Scan();
 
         GUILayout.FlexibleSpace();
 
         var db = EventDatabase.Instance;
-        GUILayout.Label(db != null ? $"EventDatabase: {db.events.Count} kanal" : "EventDatabase YOK!", EditorStyles.miniLabel);
+        GUILayout.Label(db != null ? $"EventDatabase: {db.events.Count} Kayıt" : "⚠ EventDatabase Bulunamadı!", EditorStyles.miniLabel);
         EditorGUILayout.EndHorizontal();
 
         EditorGUILayout.LabelField(_status, EditorStyles.miniLabel);
@@ -104,8 +101,8 @@ public class EventAuditWindow : EditorWindow
         int warnings = _findings.Count(f => f.Severity == Severity.Warning);
 
         EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-        Badge($"{errors} hata", errors > 0 ? new Color(1f, 0.5f, 0.5f) : Color.grey);
-        Badge($"{warnings} uyarı", warnings > 0 ? new Color(1f, 0.8f, 0.4f) : Color.grey);
+        Badge($"{errors} Hata", errors > 0 ? new Color(1f, 0.45f, 0.45f) : Color.grey);
+        Badge($"{warnings} Uyarı", warnings > 0 ? new Color(1f, 0.85f, 0.4f) : Color.grey);
         GUILayout.FlexibleSpace();
         EditorGUILayout.EndHorizontal();
     }
@@ -114,7 +111,7 @@ public class EventAuditWindow : EditorWindow
     {
         var prev = GUI.color;
         GUI.color = color;
-        GUILayout.Label(text, EditorStyles.boldLabel, GUILayout.Width(90));
+        GUILayout.Label(text, EditorStyles.boldLabel, GUILayout.Width(100));
         GUI.color = prev;
     }
 
@@ -134,21 +131,26 @@ public class EventAuditWindow : EditorWindow
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
         EditorGUILayout.BeginHorizontal();
 
-        string icon = f.Severity switch
-        {
-            Severity.Error => "<color=#FF5555>✖</color>",
-            _ => "<color=#FFB347>▲</color>",
-        };
-
+        string icon = f.Severity == Severity.Error ? "<color=#FF5555>✖</color>" : "<color=#FFB347>▲</color>";
         var rich = new GUIStyle(EditorStyles.label) { richText = true };
+
         GUILayout.Label($"{icon} <b>{f.Channel}</b>  <color=grey>{f.Message}</color>", rich);
         GUILayout.FlexibleSpace();
 
-        if (f.Context != null && GUILayout.Button("Göster", EditorStyles.miniButton, GUILayout.Width(58)))
+        // Hızlı Çözüm: DB'ye ekle butonu
+        if (f.MissingType != null && GUILayout.Button("➕ DB'ye Ekle", EditorStyles.miniButton, GUILayout.Width(85)))
+        {
+            AddMissingEventToDb(f.Channel, f.MissingType);
+            Scan();
+            GUIUtility.ExitGUI();
+        }
+
+        if (f.Context != null && GUILayout.Button("Göster", EditorStyles.miniButton, GUILayout.Width(50)))
         {
             Selection.activeObject = f.Context;
             EditorGUIUtility.PingObject(f.Context);
         }
+
         EditorGUILayout.EndHorizontal();
 
         if (!string.IsNullOrEmpty(f.Where))
@@ -161,24 +163,24 @@ public class EventAuditWindow : EditorWindow
     {
         if (_channelSummary.Count == 0) return;
 
-        EditorGUILayout.LabelField("Kanal Özeti", EditorStyles.boldLabel);
-        EditorGUILayout.LabelField("Tetikleyici / Dinleyici  —  kanal", EditorStyles.miniLabel);
+        EditorGUILayout.LabelField("Kayıtlı Kanalların Kullanım Özeti", EditorStyles.boldLabel);
+        EditorGUILayout.LabelField("Tetikleyici / Dinleyici  —  Kanal Yolu", EditorStyles.miniLabel);
 
-        foreach (var (channel, pub, lis, known, persistent) in _channelSummary)
+        foreach (var item in _channelSummary)
         {
             EditorGUILayout.BeginHorizontal();
             var prev = GUI.color;
-            if (!known) GUI.color = new Color(1f, 0.8f, 0.4f);
+            if (!item.known) GUI.color = new Color(1f, 0.8f, 0.4f);
 
-            GUILayout.Label($"{pub,3} / {lis,-3}", EditorStyles.miniLabel, GUILayout.Width(60));
-            GUILayout.Label(channel, EditorStyles.label);
-            if (persistent) GUILayout.Label("💾", EditorStyles.miniLabel, GUILayout.Width(20));
+            GUILayout.Label($"{item.pub,3} / {item.lis,-3}", EditorStyles.miniLabel, GUILayout.Width(60));
+            GUILayout.Label(item.channel, EditorStyles.label);
+            if (!string.IsNullOrEmpty(item.defVal)) GUILayout.Label($"[Varsayılan: {item.defVal}]", EditorStyles.miniLabel);
+            if (item.persistent) GUILayout.Label("💾", EditorStyles.miniLabel, GUILayout.Width(20));
+
             GUI.color = prev;
             EditorGUILayout.EndHorizontal();
         }
     }
-
-    // ---------- Tarama ----------
 
     private void Scan()
     {
@@ -186,14 +188,14 @@ public class EventAuditWindow : EditorWindow
         _channelSummary.Clear();
 
         var bindings = new List<Binding>();
-        ScanPrefabs(bindings);
-        ScanScriptableObjects(bindings);
         ScanOpenScenes(bindings);
+        ScanScriptableObjects(bindings);
+        ScanPrefabs(bindings);
 
         Analyze(bindings);
 
         _hasScanned = true;
-        _status = $"{bindings.Count} bağlama tarandı • {_channelSummary.Count} kanal";
+        _status = $"{bindings.Count} bağlama tarandı • {_channelSummary.Count} kanal listelendi.";
         Repaint();
     }
 
@@ -206,20 +208,20 @@ public class EventAuditWindow : EditorWindow
             if (go == null) continue;
 
             foreach (var comp in go.GetComponentsInChildren<Component>(true))
-                Extract(comp, path, bindings);
+                Extract(comp, path, bindings, true);
         }
     }
 
     private void ScanScriptableObjects(List<Binding> bindings)
     {
-        foreach (var type in ScriptableObjectTypesWithChannels())
+        foreach (var type in TypeCache.GetTypesDerivedFrom<ScriptableObject>())
         {
+            if (type.IsAbstract) continue;
             foreach (string guid in AssetDatabase.FindAssets($"t:{type.Name}"))
             {
                 string path = AssetDatabase.GUIDToAssetPath(guid);
                 var so = AssetDatabase.LoadAssetAtPath<ScriptableObject>(path);
-                if (so == null || !type.IsInstanceOfType(so)) continue;
-                Extract(so, path, bindings);
+                if (so != null) Extract(so, path, bindings, false);
             }
         }
     }
@@ -234,12 +236,12 @@ public class EventAuditWindow : EditorWindow
             foreach (var root in scene.GetRootGameObjects())
             {
                 foreach (var comp in root.GetComponentsInChildren<Component>(true))
-                    Extract(comp, scene.name, bindings);
+                    Extract(comp, scene.name, bindings, false);
             }
         }
     }
 
-    private void Extract(UnityEngine.Object obj, string whereBase, List<Binding> bindings)
+    private void Extract(UnityEngine.Object obj, string whereBase, List<Binding> bindings, bool isPrefab)
     {
         if (obj == null) return;
 
@@ -247,19 +249,20 @@ public class EventAuditWindow : EditorWindow
         if (fields.Count == 0) return;
 
         string where = obj is Component comp && comp.transform.parent != null
-            ? $"{whereBase} :: {HierarchyPath(comp.transform)}"
+            ? $"{whereBase} -> {comp.gameObject.name}"
             : whereBase;
 
-        foreach (var (field, type, isPublisher) in fields.Select(cf => (cf.field, cf.type, cf.isPublisher)))
+        foreach (var cf in fields)
         {
             bindings.Add(new Binding
             {
-                Channel = field.GetValue(obj) as string ?? "",
-                Type = type,
-                IsPublisher = isPublisher,
-                FieldName = field.Name,
+                Channel = cf.field.GetValue(obj) as string ?? "",
+                Type = cf.type,
+                IsPublisher = cf.isPublisher,
+                FieldName = cf.field.Name,
                 Where = where,
                 Context = obj,
+                IsPrefab = isPrefab
             });
         }
     }
@@ -268,17 +271,16 @@ public class EventAuditWindow : EditorWindow
     {
         var db = EventDatabase.Instance;
 
-        // DB çakışmaları
+        // DB içinde çakışan aynı isimli tanımlar
         if (db != null)
         {
             foreach (var grp in db.events.Where(e => !string.IsNullOrEmpty(e.FullPath)).GroupBy(e => e.FullPath))
             {
                 if (grp.Count() > 1)
-                    Add(Severity.Error, grp.Key, $"{grp.Count()} kez tanımlı (çakışma)", "", null);
+                    Add(Severity.Error, grp.Key, $"{grp.Count()} kez tanımlanmış (İsim Çakışması!)", "", null, null);
             }
         }
 
-        // Bağlama bazlı kontroller
         var seen = new HashSet<string>();
         foreach (var b in bindings)
         {
@@ -289,7 +291,9 @@ public class EventAuditWindow : EditorWindow
 
             if (string.IsNullOrEmpty(b.Channel))
             {
-                Add(Severity.Error, "(boş)", $"Kanal seçilmemiş — {b.FieldName} ({role})", b.Where, b.Context);
+                // Sahnede aktifse HATA, sadece diskte bekleyen prefab şablonuysa UYARI
+                var sev = b.IsPrefab ? Severity.Warning : Severity.Error;
+                Add(sev, "(boş)", $"Kanal seçilmemiş — {b.FieldName} ({role})", b.Where, b.Context, null);
                 continue;
             }
 
@@ -298,20 +302,19 @@ public class EventAuditWindow : EditorWindow
             if (!db.TryGetExpectedType(b.Channel, out Type expected))
             {
                 Add(Severity.Warning, b.Channel,
-                    $"Veritabanında tanımlı değil — {b.FieldName} ({role})", b.Where, b.Context);
+                    $"Veritabanında kayıtlı değil — {b.FieldName} ({role})", b.Where, b.Context, b.Type);
                 continue;
             }
 
-            Type fieldType = b.Type;
-            if (expected != fieldType)
+            if (expected != b.Type)
             {
                 Add(Severity.Error, b.Channel,
-                    $"Tip uyuşmazlığı — alan {Name(fieldType)}, veritabanı {Name(expected)} ({b.FieldName})",
-                    b.Where, b.Context);
+                    $"Tip uyuşmazlığı — Alan: {Name(b.Type)}, DB: {Name(expected)} ({b.FieldName})",
+                    b.Where, b.Context, null);
             }
         }
 
-        // Kanal özeti + ölü kanal tespiti
+        // Özet Listesi
         var grouped = bindings.Where(b => !string.IsNullOrEmpty(b.Channel))
                               .GroupBy(b => b.Channel)
                               .ToDictionary(g => g.Key, g => g.ToList());
@@ -320,61 +323,28 @@ public class EventAuditWindow : EditorWindow
         {
             foreach (var ev in db.events.Where(e => !string.IsNullOrEmpty(e.FullPath)))
             {
-                if (_channelSummary.Any(c => c.channel == ev.FullPath)) continue;
-
                 grouped.TryGetValue(ev.FullPath, out var list);
                 int pub = list?.Count(b => b.IsPublisher) ?? 0;
                 int lis = list?.Count(b => !b.IsPublisher) ?? 0;
+                object defVal = ev.payload?.GetDefaultRawValue();
 
-                _channelSummary.Add((ev.FullPath, pub, lis, true, ev.isPersistent));
+                _channelSummary.Add((ev.FullPath, pub, lis, true, ev.isPersistent, defVal != null ? defVal.ToString() : ""));
             }
-        }
-
-        // DB'de olmayan ama kullanılan kanallar da özete girsin
-        foreach (var (channel, list) in grouped)
-        {
-            if (_channelSummary.Any(c => c.channel == channel)) continue;
-            _channelSummary.Add((channel, list.Count(b => b.IsPublisher), list.Count(b => !b.IsPublisher), false, false));
-        }
-
-        // Aynı kanalı hem void hem tipli kullanan var mı?
-        foreach (var (channel, list) in grouped)
-        {
-            var types = list.Select(b => b.Type).Distinct().ToList();
-            if (types.Count > 1)
-                Add(Severity.Error, channel,
-                    $"Aynı kanal {types.Count} farklı tiple kullanılıyor: {string.Join(", ", types.Select(Name))}",
-                    "", null);
         }
 
         _channelSummary.Sort((a, b) => string.Compare(a.channel, b.channel, StringComparison.OrdinalIgnoreCase));
     }
 
-    private void Add(Severity s, string channel, string message, string where, UnityEngine.Object ctx)
-        => _findings.Add(new Finding { Severity = s, Channel = channel, Message = message, Where = where, Context = ctx });
+    private void Add(Severity s, string channel, string message, string where, UnityEngine.Object ctx, Type missingType)
+        => _findings.Add(new Finding { Severity = s, Channel = channel, Message = message, Where = where, Context = ctx, MissingType = missingType });
 
-    private static string Name(Type t) => t == null || t == typeof(void) ? "void" : t.Name;
-
-    private static string HierarchyPath(Transform t)
-    {
-        string path = t.name;
-        while (t.parent != null)
-        {
-            t = t.parent;
-            path = t.name + "/" + path;
-        }
-        return path;
-    }
-
-    // ---------- Yansıma önbelleği ----------
+    private static string Name(Type t) => t == null || t == typeof(void) ? "Void" : t.Name;
 
     private List<ChannelField> ChannelFields(Type type)
     {
-        if (_fieldCache.TryGetValue(type, out var cached))
-            return cached;
+        if (_fieldCache.TryGetValue(type, out var cached)) return cached;
 
         var result = new List<ChannelField>();
-
         foreach (var f in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
         {
             if (f.FieldType != typeof(string)) continue;
@@ -398,19 +368,39 @@ public class EventAuditWindow : EditorWindow
         public bool isPublisher;
     }
 
-    private static IEnumerable<Type> ScriptableObjectTypesWithChannels()
+    private void AddMissingEventToDb(string channelPath, Type type)
     {
-        foreach (var t in TypeCache.GetTypesDerivedFrom<ScriptableObject>())
+        var db = EventDatabase.Instance;
+        if (db == null) return;
+
+        string group = "";
+        string name = channelPath;
+        int lastSlash = channelPath.LastIndexOf('/');
+        if (lastSlash >= 0)
         {
-            if (t.IsAbstract) continue;
-            if (t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                 .Any(f => f.FieldType == typeof(string) &&
-                           (f.GetCustomAttribute<EventPublisherAttribute>() != null ||
-                            f.GetCustomAttribute<EventListenerAttribute>() != null)))
-            {
-                yield return t;
-            }
+            group = channelPath.Substring(0, lastSlash);
+            name = channelPath.Substring(lastSlash + 1);
         }
+
+        IEventPayload payload;
+        if (type == typeof(int)) payload = new IntPayload();
+        else if (type == typeof(float)) payload = new FloatPayload();
+        else if (type == typeof(bool)) payload = new BoolPayload();
+        else if (type == typeof(string)) payload = new StringPayload();
+        else if (type == typeof(Vector3)) payload = new Vector3Payload();
+        else payload = new VoidPayload();
+
+        var newDef = new EventDatabase.EventDefinition
+        {
+            group = group,
+            eventName = name,
+            payload = payload,
+            isPersistent = false
+        };
+
+        db.events.Insert(0, newDef);
+        EditorUtility.SetDirty(db);
+        AssetDatabase.SaveAssets();
     }
 }
 #endif

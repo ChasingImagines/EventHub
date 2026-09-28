@@ -1,167 +1,143 @@
 #if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 
 public class EventMatrixWindow : EditorWindow
 {
-    private const float PULSE_DURATION = 0.5f;
-    private const double MIN_FRAME_TIME = 0.0333; // Max 30 FPS sınırı
-
     private Vector2 _scrollPos;
     private string _searchQuery = "";
     private static readonly Dictionary<string, bool> _foldoutStates = new();
-    private static readonly Dictionary<string, double> _pulseTimestamps = new();
-    private static readonly List<string> _expiredKeysCache = new();
+    private static readonly Dictionary<Type, List<(FieldInfo field, bool isPub, bool isLis)>> _typeFieldCache = new();
 
-    private static EventFolderNode _cachedTreeRoot;
-    private static bool _needsTreeRebuild = true;
-    private static double _lastRepaintTime;
+    // En son tetiklenen kanalı ve tetikleyen sender nesnesini takip eder
+    private static readonly Dictionary<string, (object sender, double time)> _lastTriggers = new(StringComparer.OrdinalIgnoreCase);
 
-    private class ObjectTreeNode
+    // --- PERFORMANS VE FPS KİLİTLERİ (THROTTLING) ---
+    private static double _lastRepaintTime = 0.0;
+    private const double REPAINT_INTERVAL = 0.1; // Maksimum 10 FPS (100ms) yenileme
+    private static bool _repaintPending = false;
+
+    private class EventItem
     {
-        public Dictionary<string, ObjectTreeNode> SubFolders = new();
-        public Dictionary<string, List<UnityEngine.Object>> ComponentTypes = new();
-
-        public int CleanAndGetTotalCount()
-        {
-            int total = 0;
-            foreach (var list in ComponentTypes.Values)
-            {
-                list.RemoveAll(obj => obj == null);
-                total += list.Count;
-            }
-            foreach (var sub in SubFolders.Values)
-            {
-                total += sub.CleanAndGetTotalCount();
-            }
-            return total;
-        }
-    }
-
-    private class EventLink
-    {
-        public ObjectTreeNode publisherRoot = new();
-        public ObjectTreeNode listenerRoot = new();
-        public bool hasPublishers = false;
-        public bool hasListeners = false;
-    }
-
-    private class EventFolderNode
-    {
-        public string Name;
-        public Dictionary<string, EventFolderNode> SubFolders = new();
-        public EventLink LeafEventData;
         public string FullPath;
-        public int TotalChildEventsCount;
+        public string Group;
+        public string Name;
+        public Type DataType;
+        public bool IsPersistent;
+        public object DefaultValue;
+        public List<UnityEngine.Object> Publishers = new();
+        public List<UnityEngine.Object> Listeners = new();
     }
+
+    private List<EventItem> _cachedItems = new();
+    private bool _needsRebuild = true;
 
     [MenuItem("Tools/Architecture/Event Matrix")]
     public static void OpenWindow()
     {
-        GetWindow<EventMatrixWindow>("Event Matrix");
+        var win = GetWindow<EventMatrixWindow>("Event Matrix");
+        win.minSize = new Vector2(520, 320);
     }
 
     private void OnEnable()
     {
-        _needsTreeRebuild = true;
-        EventHub.OnEventRaisedInEditor -= HandleEventFired;
-        EventHub.OnEventRaisedInEditor += HandleEventFired;
-        EditorApplication.update -= OnEditorUpdate;
-        EditorApplication.update += OnEditorUpdate;
-
+        _needsRebuild = true;
         EditorApplication.playModeStateChanged -= OnPlayModeChanged;
         EditorApplication.playModeStateChanged += OnPlayModeChanged;
-        EditorApplication.hierarchyChanged -= OnHierarchyChanged;
-        EditorApplication.hierarchyChanged += OnHierarchyChanged;
+
+        EventHub.OnEventRaisedInEditor -= OnEventFiredInEditor;
+        EventHub.OnEventRaisedInEditor += OnEventFiredInEditor;
+
+        EditorApplication.update -= ThrottledUpdate;
+        EditorApplication.update += ThrottledUpdate;
     }
 
     private void OnDisable()
     {
-        EventHub.OnEventRaisedInEditor -= HandleEventFired;
-        EditorApplication.update -= OnEditorUpdate;
         EditorApplication.playModeStateChanged -= OnPlayModeChanged;
-        EditorApplication.hierarchyChanged -= OnHierarchyChanged;
-        _pulseTimestamps.Clear();
+        EventHub.OnEventRaisedInEditor -= OnEventFiredInEditor;
+        EditorApplication.update -= ThrottledUpdate;
     }
 
-    private void OnPlayModeChanged(PlayModeStateChange state)
+    private void OnEventFiredInEditor(string channel, object sender)
     {
-        _needsTreeRebuild = true;
-        _cachedTreeRoot = null;
-        _pulseTimestamps.Clear();
-        Repaint();
-    }
+        if (string.IsNullOrEmpty(channel)) return;
 
-    private void OnHierarchyChanged()
-    {
-        _needsTreeRebuild = true;
-    }
-
-    private void HandleEventFired(string eventName)
-    {
         double now = EditorApplication.timeSinceStartup;
-        _pulseTimestamps[eventName] = now;
+        _lastTriggers[channel] = (sender, now);
+        _repaintPending = true;
+    }
 
-        if (now - _lastRepaintTime >= MIN_FRAME_TIME)
+    private void ThrottledUpdate()
+    {
+        if (!Application.isPlaying) return;
+
+        double now = EditorApplication.timeSinceStartup;
+
+        // Yoğun event bombardımanında bile UI en fazla 100ms aralıkla çizilir
+        if (_repaintPending && (now - _lastRepaintTime) >= REPAINT_INTERVAL)
         {
             _lastRepaintTime = now;
+            _repaintPending = false;
             Repaint();
         }
     }
 
-    private void OnEditorUpdate()
+    private void OnPlayModeChanged(PlayModeStateChange state)
     {
-        if (_pulseTimestamps.Count == 0) return;
-
-        double now = EditorApplication.timeSinceStartup;
-        if (now - _lastRepaintTime < MIN_FRAME_TIME) return;
-
-        bool hasActivePulse = false;
-        _expiredKeysCache.Clear();
-
-        foreach (var (eventName, timestamp) in _pulseTimestamps)
+        if (state == PlayModeStateChange.EnteredPlayMode || state == PlayModeStateChange.EnteredEditMode)
         {
-            if (now - timestamp < PULSE_DURATION)
-                hasActivePulse = true;
-            else
-                _expiredKeysCache.Add(eventName);
-        }
-
-        for (int i = 0; i < _expiredKeysCache.Count; i++)
-            _pulseTimestamps.Remove(_expiredKeysCache[i]);
-
-        if (hasActivePulse || _expiredKeysCache.Count > 0)
-        {
-            _lastRepaintTime = now;
+            _needsRebuild = true;
             Repaint();
         }
     }
 
     private void OnGUI()
     {
-        if (_needsTreeRebuild || _cachedTreeRoot == null)
+        if (_needsRebuild)
         {
-            _cachedTreeRoot = BuildEventTree();
-            _needsTreeRebuild = false;
+            RebuildData();
+            _needsRebuild = false;
         }
 
         DrawToolbar();
+        DrawTableHeader();
 
-        _scrollPos = EditorGUILayout.BeginScrollView(_scrollPos);
+        // Kalıcı dikey scrollbar
+        _scrollPos = EditorGUILayout.BeginScrollView(_scrollPos, false, true);
 
-        if (_cachedTreeRoot.SubFolders.Count == 0)
+        if (_cachedItems.Count == 0)
         {
-            EditorGUILayout.Space(10);
-            EditorGUILayout.HelpBox("Sahnede veya ScriptableObject'lerde aktif olay bulunamadı.", MessageType.Info);
+            EditorGUILayout.Space(20);
+            EditorGUILayout.HelpBox("Tanımlı veya sahnede kullanılan olay bulunamadı.", MessageType.Info);
         }
         else
         {
-            EditorGUILayout.Space(5);
-            DrawEventFolders(_cachedTreeRoot, "Root");
+            string currentGroup = null;
+
+            for (int i = 0; i < _cachedItems.Count; i++)
+            {
+                var item = _cachedItems[i];
+
+                if (!string.IsNullOrEmpty(_searchQuery))
+                {
+                    if (item.FullPath.IndexOf(_searchQuery, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                }
+
+                if (currentGroup != item.Group)
+                {
+                    currentGroup = item.Group;
+                    DrawGroupHeader(string.IsNullOrEmpty(currentGroup) ? "Genel (Kök)" : currentGroup);
+                }
+
+                DrawEventRow(item, i);
+            }
+
+            EditorGUILayout.Space(16);
         }
 
         EditorGUILayout.EndScrollView();
@@ -171,403 +147,397 @@ public class EventMatrixWindow : EditorWindow
     {
         EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
-        if (GUILayout.Button("🔄 Yeniden Tara", EditorStyles.toolbarButton, GUILayout.Width(95)))
+        if (GUILayout.Button("🔄 Yenile", EditorStyles.toolbarButton, GUILayout.Width(65)))
         {
-            _needsTreeRebuild = true;
-            Repaint();
+            _needsRebuild = true;
+            GUIUtility.keyboardControl = 0;
         }
 
         EditorGUI.BeginChangeCheck();
         _searchQuery = EditorGUILayout.TextField(_searchQuery, EditorStyles.toolbarSearchField);
-        if (EditorGUI.EndChangeCheck())
-        {
-            _needsTreeRebuild = true;
-        }
+        if (EditorGUI.EndChangeCheck()) { }
 
         if (GUILayout.Button("", GUI.skin.FindStyle("ToolbarSearchCancelButton") ?? EditorStyles.toolbarButton))
         {
             _searchQuery = "";
             GUIUtility.keyboardControl = 0;
-            _needsTreeRebuild = true;
         }
+
+        GUILayout.FlexibleSpace();
 
         if (GUILayout.Button("Tümünü Aç", EditorStyles.toolbarButton, GUILayout.Width(75)))
         {
-            if (_cachedTreeRoot != null) SetAllFoldoutsRecursive(_cachedTreeRoot, "Root", true);
+            foreach (var item in _cachedItems) _foldoutStates[item.FullPath] = true;
         }
 
         if (GUILayout.Button("Kapat", EditorStyles.toolbarButton, GUILayout.Width(50)))
         {
-            if (_cachedTreeRoot != null) SetAllFoldoutsRecursive(_cachedTreeRoot, "Root", false);
+            _foldoutStates.Clear();
         }
 
         EditorGUILayout.EndHorizontal();
     }
 
-    private EventFolderNode BuildEventTree()
+    private void DrawTableHeader()
     {
-        var root = new EventFolderNode { Name = "Root" };
-        var rawMap = new Dictionary<string, EventLink>();
+        Rect r = EditorGUILayout.GetControlRect(false, 20);
+        EditorGUI.DrawRect(r, EditorGUIUtility.isProSkin ? new Color(0.18f, 0.18f, 0.18f) : new Color(0.75f, 0.75f, 0.75f));
 
-        // 1. Sahnedeki MonoBehaviour'ları tara
-        var behaviours = FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None);
-        foreach (var mb in behaviours)
-        {
-            if (mb == null) continue;
-            var groupComp = mb.GetComponentInParent<EventGroup>();
-            string groupPath = groupComp != null ? groupComp.GetFullHierarchyPath() : "";
-            ScanObjectFields(mb, groupPath, rawMap);
-        }
+        var style = new GUIStyle(EditorStyles.miniBoldLabel) { alignment = TextAnchor.MiddleLeft };
 
-        // 2. IEventHubListener uygulayan tüm ScriptableObject varlıklarını tara
-        var listenerTypes = TypeCache.GetTypesDerivedFrom<IEventHubListener>();
-        var scannedGuids = new HashSet<string>();
-
-        foreach (var type in listenerTypes)
-        {
-            if (!typeof(ScriptableObject).IsAssignableFrom(type) || type.IsAbstract) continue;
-
-            string[] guids = AssetDatabase.FindAssets($"t:{type.Name}");
-            foreach (var guid in guids)
-            {
-                if (!scannedGuids.Add(guid)) continue;
-
-                string assetPath = AssetDatabase.GUIDToAssetPath(guid);
-                var so = AssetDatabase.LoadAssetAtPath<ScriptableObject>(assetPath);
-                if (so == null) continue;
-
-                // Derin disk yolu yerine doğrudan temiz grup altında topla
-                ScanObjectFields(so, "Scriptable Objects", rawMap);
-            }
-        }
-
-        foreach (var (fullPath, link) in rawMap)
-        {
-            string[] parts = fullPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            var current = root;
-
-            for (int i = 0; i < parts.Length; i++)
-            {
-                string part = parts[i];
-                bool isLeaf = (i == parts.Length - 1);
-
-                if (!current.SubFolders.TryGetValue(part, out var nextNode))
-                {
-                    nextNode = new EventFolderNode { Name = part };
-                    current.SubFolders[part] = nextNode;
-                }
-
-                if (isLeaf)
-                {
-                    nextNode.LeafEventData = link;
-                    nextNode.FullPath = fullPath;
-                }
-
-                current.TotalChildEventsCount++;
-                current = nextNode;
-            }
-        }
-
-        return root;
+        GUI.Label(new Rect(r.x + 22, r.y, 180, r.height), "OLAY KANALI", style);
+        GUI.Label(new Rect(r.x + 210, r.y, 80, r.height), "TİP", style);
+        GUI.Label(new Rect(r.x + 300, r.y, 90, r.height), "CANLI / DEĞER", style);
+        GUI.Label(new Rect(r.x + 400, r.y, 50, r.height), "YAYIN", style);
+        GUI.Label(new Rect(r.x + 460, r.y, 50, r.height), "DİNLE", style);
     }
 
-    private void ScanObjectFields(UnityEngine.Object target, string groupPath, Dictionary<string, EventLink> rawMap)
+    private void DrawGroupHeader(string groupName)
     {
-        var fields = target.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        foreach (var f in fields)
-        {
-            if (f.FieldType != typeof(string)) continue;
-            string eventPath = f.GetValue(target) as string;
-            if (string.IsNullOrEmpty(eventPath)) continue;
-
-            if (!string.IsNullOrEmpty(_searchQuery) &&
-                eventPath.IndexOf(_searchQuery, StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                continue;
-            }
-
-            if (f.GetCustomAttribute<EventPublisherAttribute>() != null)
-            {
-                if (!rawMap.ContainsKey(eventPath)) rawMap[eventPath] = new EventLink();
-                InsertIntoObjectTree(rawMap[eventPath].publisherRoot, groupPath, target);
-                rawMap[eventPath].hasPublishers = true;
-            }
-
-            if (f.GetCustomAttribute<EventListenerAttribute>() != null)
-            {
-                if (!rawMap.ContainsKey(eventPath)) rawMap[eventPath] = new EventLink();
-                InsertIntoObjectTree(rawMap[eventPath].listenerRoot, groupPath, target);
-                rawMap[eventPath].hasListeners = true;
-            }
-        }
+        EditorGUILayout.Space(4);
+        Rect r = EditorGUILayout.GetControlRect(false, 18);
+        EditorGUI.DrawRect(r, EditorGUIUtility.isProSkin ? new Color(0.14f, 0.14f, 0.14f) : new Color(0.85f, 0.85f, 0.85f));
+        GUI.Label(new Rect(r.x + 6, r.y, r.width, r.height), $"📁  {groupName}", EditorStyles.boldLabel);
     }
 
-    private void DrawEventFolders(EventFolderNode node, string currentPathKey)
+    private void DrawEventRow(EventItem item, int index)
     {
-        foreach (var (folderName, subNode) in node.SubFolders)
+        bool isOpen = _foldoutStates.TryGetValue(item.FullPath, out bool v) && v;
+        Rect rowRect = EditorGUILayout.GetControlRect(false, 22);
+
+        // --- 1. KISITLANMIŞ VE SINIRLI PARLAMA (CLAMPED FLASH) ---
+        float flashAlpha = 0f;
+        if (_lastTriggers.TryGetValue(item.FullPath, out var trig))
         {
-            string nodeKey = $"{currentPathKey}/{folderName}";
-
-            if (subNode.LeafEventData != null && subNode.SubFolders.Count == 0)
+            float elapsed = (float)(EditorApplication.timeSinceStartup - trig.time);
+            if (elapsed < 1.0f)
             {
-                DrawEventCard(subNode.Name, subNode.FullPath, subNode.LeafEventData, nodeKey);
+                flashAlpha = Mathf.Clamp01(1.0f - elapsed);
             }
-            else
+        }
+
+        if (flashAlpha > 0.05f)
+        {
+            Color flashColor = new Color(0.2f, 1f, 0.4f, flashAlpha * 0.35f);
+            EditorGUI.DrawRect(rowRect, flashColor);
+        }
+        else if (index % 2 == 0)
+        {
+            EditorGUI.DrawRect(rowRect, new Color(1, 1, 1, 0.03f));
+        }
+
+        // --- 2. FOLD OUT BUTONU ---
+        Rect foldoutRect = new Rect(rowRect.x + 4, rowRect.y + 2, 16, 16);
+        isOpen = EditorGUI.Foldout(foldoutRect, isOpen, GUIContent.none);
+        _foldoutStates[item.FullPath] = isOpen;
+
+        // --- 3. OLAY ADI & KALICILIK İKONU ---
+        string displayName = item.Name + (item.IsPersistent ? "  💾" : "");
+        GUI.Label(new Rect(rowRect.x + 22, rowRect.y, 180, rowRect.height), displayName, EditorStyles.boldLabel);
+
+        // --- 4. TİP ROZETİ ---
+        string typeName = GetFriendlyTypeName(item.DataType);
+        GUI.color = item.DataType == typeof(void) ? Color.gray : new Color(0.4f, 0.8f, 1f);
+        GUI.Label(new Rect(rowRect.x + 210, rowRect.y, 80, rowRect.height), $"[{typeName}]", EditorStyles.miniLabel);
+        GUI.color = Color.white;
+
+        // --- 5. CANLI DEĞER VEYA VARSAYILAN DEĞER ALANI ---
+        string valStr = "-";
+        if (Application.isPlaying)
+        {
+            if (EventHub.TryGetRawState(item.FullPath, out object rawVal, out bool hasVal, out _))
             {
-                bool defaultOpen = !string.IsNullOrEmpty(_searchQuery);
-                if (!_foldoutStates.ContainsKey(nodeKey)) _foldoutStates[nodeKey] = defaultOpen;
-
-                int count = subNode.LeafEventData != null ? subNode.TotalChildEventsCount + 1 : subNode.TotalChildEventsCount;
-
-                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                _foldoutStates[nodeKey] = EditorGUILayout.Foldout(
-                    _foldoutStates[nodeKey],
-                    $"📁 <b>{folderName}</b> <color=grey>({count} Olay)</color>",
-                    true,
-                    new GUIStyle(EditorStyles.foldoutHeader) { richText = true }
-                );
-
-                if (_foldoutStates[nodeKey])
+                if (hasVal)
                 {
-                    EditorGUI.indentLevel++;
-                    if (subNode.LeafEventData != null)
+                    if (item.DataType == typeof(void))
                     {
-                        DrawEventCard(subNode.Name, subNode.FullPath, subNode.LeafEventData, $"{nodeKey}_leaf");
+                        valStr = "⚡ Sinyal";
+                        GUI.color = new Color(0.4f, 0.9f, 1f);
                     }
-                    DrawEventFolders(subNode, nodeKey);
-                    EditorGUI.indentLevel--;
+                    else
+                    {
+                        valStr = $"⚡ {rawVal}";
+                        GUI.color = new Color(0.2f, 1f, 0.4f);
+                    }
                 }
-                EditorGUILayout.EndVertical();
-                EditorGUILayout.Space(2);
+                else
+                {
+                    valStr = "<Tüketildi>";
+                    GUI.color = new Color(1f, 0.4f, 0.4f);
+                }
             }
+            else if (item.DefaultValue != null)
+            {
+                valStr = item.DefaultValue.ToString();
+            }
+        }
+        else if (item.DefaultValue != null)
+        {
+            valStr = item.DefaultValue.ToString();
+        }
+
+        GUI.Label(new Rect(rowRect.x + 300, rowRect.y, 90, rowRect.height), valStr, EditorStyles.miniLabel);
+        GUI.color = Color.white;
+
+        // --- 6. YAYINLAYAN VE DİNLEYEN SAYILARI ---
+        GUI.color = item.Publishers.Count > 0 ? new Color(1f, 0.7f, 0.3f) : Color.gray;
+        GUI.Label(new Rect(rowRect.x + 400, rowRect.y, 50, rowRect.height), $"▶ {item.Publishers.Count}", EditorStyles.boldLabel);
+
+        GUI.color = item.Listeners.Count > 0 ? new Color(0.4f, 1f, 0.5f) : Color.gray;
+        GUI.Label(new Rect(rowRect.x + 460, rowRect.y, 50, rowRect.height), $"◀ {item.Listeners.Count}", EditorStyles.boldLabel);
+        GUI.color = Color.white;
+
+        // --- 7. DETAYLAR (AÇIKSA) ---
+        if (isOpen)
+        {
+            DrawEventDetails(item);
         }
     }
 
-    private void DrawEventCard(string displayName, string fullPath, EventLink link, string key)
+    private void DrawEventDetails(EventItem item)
     {
-        float pulseFactor = 0f;
-        if (_pulseTimestamps.TryGetValue(fullPath, out double lastFired))
-        {
-            float elapsed = (float)(EditorApplication.timeSinceStartup - lastFired);
-            if (elapsed < PULSE_DURATION)
-            {
-                pulseFactor = 1f - (elapsed / PULSE_DURATION);
-            }
-        }
-
-        Color defaultBg = GUI.backgroundColor;
-        if (pulseFactor > 0f)
-        {
-            GUI.backgroundColor = Color.Lerp(defaultBg, new Color(0.2f, 1f, 0.3f, 1f), pulseFactor);
-        }
-
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-        GUI.backgroundColor = defaultBg;
+        EditorGUILayout.BeginHorizontal();
 
-        bool defaultOpen = !string.IsNullOrEmpty(_searchQuery);
-        if (!_foldoutStates.ContainsKey(key)) _foldoutStates[key] = defaultOpen;
+        // Sol Sütun: Yayınlayanlar
+        EditorGUILayout.BeginVertical(GUILayout.Width(EditorGUIUtility.currentViewWidth * 0.47f));
+        EditorGUILayout.LabelField($"▶ Yayınlayanlar ({item.Publishers.Count})", EditorStyles.boldLabel);
 
-        int pubCount = link.publisherRoot.CleanAndGetTotalCount();
-        int lisCount = link.listenerRoot.CleanAndGetTotalCount();
-
-        Type expectedType = EventDatabase.Instance != null ? EventDatabase.Instance.GetExpectedType(fullPath) : typeof(void);
-        string typeBadge = expectedType == typeof(void) ? "Void" : expectedType.Name;
-
-        string statusIcon = pulseFactor > 0.05f ? "<color=#00FF66>● AKTİF</color> " : "⚡ ";
-
-        // Canlı State (Değer) Bilgisini Çek
-        string stateBadge = "";
-        string stateDetailedText = "<color=grey><i>(Henüz veri fırlatılmadı)</i></color>";
-        bool hasTrackedState = EventHub.TryGetRawState(fullPath, out object rawValue, out bool hasValue, out bool isPersistent);
-        string persistBadge = isPersistent ? "<color=#FF66CC>💾 KALICI</color> " : "";
-
-        if (hasTrackedState && hasValue)
+        // Son tetikleyen nesneyi anlık vurgula
+        if (_lastTriggers.TryGetValue(item.FullPath, out var triggerInfo) && triggerInfo.sender != null)
         {
-            if (expectedType == typeof(void))
+            double elapsed = EditorApplication.timeSinceStartup - triggerInfo.time;
+            if (elapsed < 3.0)
             {
-                stateBadge = "<color=#66E0FF>[Hazır]</color> ";
-                stateDetailedText = "<color=#66E0FF>Tetiklendi (Void Sinyal Hazır)</color>";
-            }
-            else
-            {
-                string valStr = rawValue != null ? rawValue.ToString() : "null";
-                stateBadge = $"<color=#FFD700>[Değer: {valStr}]</color> ";
-                stateDetailedText = $"<color=#FFD700><b>{valStr}</b></color>";
+                var prevC = GUI.color;
+                GUI.color = new Color(1f, 0.85f, 0.3f);
+                EditorGUILayout.LabelField($"⚡ Son Tetikleyen: {triggerInfo.sender}", EditorStyles.miniBoldLabel);
+                GUI.color = prevC;
             }
         }
-        else if (hasTrackedState && !hasValue)
+
+        if (item.Publishers.Count == 0)
         {
-            stateBadge = "<color=#FF6666>[Tüketildi]</color> ";
-            stateDetailedText = "<color=#FF6666>Geçersiz / Tüketilmiş Durum</color>";
+            EditorGUILayout.LabelField("<i>(Yayınlayan yok)</i>", new GUIStyle(EditorStyles.miniLabel) { richText = true });
         }
-
-        _foldoutStates[key] = EditorGUILayout.Foldout(
-            _foldoutStates[key],
-            $"{statusIcon}<b>{displayName}</b> <color=#88CCFF>[{typeBadge}]</color> {persistBadge}{stateBadge}<color=#FFAA55>({pubCount} Tetikleyici)</color> / <color=#66CC66>({lisCount} Dinleyici)</color>",
-            true,
-            new GUIStyle(EditorStyles.foldout) { richText = true, fontStyle = FontStyle.Bold }
-        );
-
-        if (_foldoutStates[key])
+        else
         {
-            EditorGUILayout.Space(2);
-
-            // Canlı Durum (State) Çubuğu
-            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-            EditorGUILayout.LabelField($"<b>Canlı Durum:</b> {stateDetailedText}", new GUIStyle(EditorStyles.label) { richText = true });
-
-            if (hasTrackedState && hasValue)
-            {
-                if (GUILayout.Button("Tüket (Invalidate)", EditorStyles.miniButton, GUILayout.Width(130)))
-                {
-                    EventHub.Invalidate(fullPath);
-                    Repaint();
-                }
-            }
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(3);
-            EditorGUILayout.BeginHorizontal();
-
-            // Publishers
-            EditorGUILayout.BeginVertical(GUILayout.Width(position.width * 0.46f));
-            GUI.color = new Color(1f, 0.75f, 0.4f);
-            EditorGUILayout.LabelField($"▶ Tetikleyiciler ({pubCount})", EditorStyles.boldLabel);
-            GUI.color = Color.white;
-            if (pubCount == 0)
-                EditorGUILayout.LabelField("<i>(Tetikleyen yok)</i>", new GUIStyle { richText = true });
-            else
-                DrawObjectTree(link.publisherRoot, $"{key}_pub");
-            EditorGUILayout.EndVertical();
-
-            // Listeners
-            EditorGUILayout.BeginVertical(GUILayout.Width(position.width * 0.46f));
-            GUI.color = new Color(0.5f, 1f, 0.5f);
-            EditorGUILayout.LabelField($"◀ Dinleyiciler ({lisCount})", EditorStyles.boldLabel);
-            GUI.color = Color.white;
-            if (lisCount == 0)
-                EditorGUILayout.LabelField("<i>(Dinleyen yok)</i>", new GUIStyle { richText = true });
-            else
-                DrawObjectTree(link.listenerRoot, $"{key}_lis");
-            EditorGUILayout.EndVertical();
-
-            EditorGUILayout.EndHorizontal();
+            DrawGroupedTargets(item.Publishers, "pub_" + item.FullPath);
         }
+        EditorGUILayout.EndVertical();
 
+        GUILayout.Box("", GUILayout.Width(1), GUILayout.ExpandHeight(true));
+
+        // Sağ Sütun: Dinleyenler
+        EditorGUILayout.BeginVertical(GUILayout.Width(EditorGUIUtility.currentViewWidth * 0.47f));
+        EditorGUILayout.LabelField($"◀ Dinleyenler ({item.Listeners.Count})", EditorStyles.boldLabel);
+
+        if (item.Listeners.Count == 0)
+        {
+            EditorGUILayout.LabelField("<i>(Dinleyen yok)</i>", new GUIStyle(EditorStyles.miniLabel) { richText = true });
+        }
+        else
+        {
+            DrawGroupedTargets(item.Listeners, "lis_" + item.FullPath);
+        }
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.EndHorizontal();
         EditorGUILayout.EndVertical();
         EditorGUILayout.Space(2);
     }
 
-    private void DrawObjectTree(ObjectTreeNode node, string currentPath)
+    private void DrawGroupedTargets(List<UnityEngine.Object> targets, string foldoutKeyPrefix)
     {
-        foreach (var (folderName, subNode) in node.SubFolders)
+        // Hedefleri EventGroup yoluna göre gruplandır
+        var groups = new Dictionary<string, List<UnityEngine.Object>>();
+        var ungrouped = new List<UnityEngine.Object>();
+
+        for (int i = 0; i < targets.Count; i++)
         {
-            int memberCount = subNode.CleanAndGetTotalCount();
-            if (memberCount == 0) continue;
+            var target = targets[i];
+            if (target == null) continue;
 
-            string folderKey = $"{currentPath}/{folderName}";
-            bool defaultOpen = !string.IsNullOrEmpty(_searchQuery);
-            if (!_foldoutStates.ContainsKey(folderKey)) _foldoutStates[folderKey] = defaultOpen;
+            string groupPath = null;
+            if (target is Component comp)
+            {
+                var groupComp = comp.GetComponentInParent<EventGroup>(true);
+                if (groupComp != null)
+                {
+                    groupPath = groupComp.GetFullHierarchyPath();
+                }
+            }
 
-            _foldoutStates[folderKey] = EditorGUILayout.Foldout(
-                _foldoutStates[folderKey],
-                $"📁 <b>{folderName}</b> <color=grey>({memberCount} Üye)</color>",
-                true,
-                new GUIStyle(EditorStyles.foldout) { richText = true }
-            );
+            if (!string.IsNullOrEmpty(groupPath))
+            {
+                if (!groups.TryGetValue(groupPath, out var list))
+                {
+                    list = new List<UnityEngine.Object>();
+                    groups[groupPath] = list;
+                }
+                list.Add(target);
+            }
+            else
+            {
+                ungrouped.Add(target);
+            }
+        }
 
-            if (_foldoutStates[folderKey])
+        // 1. Gruplanmış Nesneleri Çiz (EventGroup olan klonlar/nesneler)
+        foreach (var (groupName, list) in groups)
+        {
+            string foldoutKey = $"{foldoutKeyPrefix}_{groupName}";
+            bool open = _foldoutStates.TryGetValue(foldoutKey, out bool v) && v;
+
+            EditorGUILayout.BeginHorizontal();
+            open = EditorGUILayout.Foldout(open, $"🏷️ {groupName} <color=grey>({list.Count})</color>", true, new GUIStyle(EditorStyles.foldout) { richText = true });
+            _foldoutStates[foldoutKey] = open;
+
+            if (GUILayout.Button("Seç", EditorStyles.miniButton, GUILayout.Width(35)))
+            {
+                var pingTarget = (list[0] is Component c) ? c.gameObject : list[0];
+                EditorGUIUtility.PingObject(pingTarget);
+                Selection.activeObject = pingTarget;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (open)
             {
                 EditorGUI.indentLevel++;
-                DrawObjectTree(subNode, folderKey);
+                for (int i = 0; i < list.Count; i++)
+                {
+                    DrawTargetObject(list[i]);
+                }
                 EditorGUI.indentLevel--;
             }
         }
 
-        foreach (var (typeName, instances) in node.ComponentTypes)
+        // 2. Grubu Olmayan Bağımsız Nesneleri Çiz
+        for (int i = 0; i < ungrouped.Count; i++)
         {
-            instances.RemoveAll(obj => obj == null);
-            if (instances.Count == 0) continue;
-
-            if (instances.Count == 1)
-            {
-                DrawPingableButton(instances[0], typeName);
-            }
-            else
-            {
-                string bundleKey = $"{currentPath}_{typeName}_bundle";
-                if (!_foldoutStates.ContainsKey(bundleKey)) _foldoutStates[bundleKey] = false;
-
-                _foldoutStates[bundleKey] = EditorGUILayout.Foldout(_foldoutStates[bundleKey], $"📦 {typeName} ({instances.Count} Adet)", true);
-
-                if (_foldoutStates[bundleKey])
-                {
-                    EditorGUI.indentLevel++;
-                    foreach (var target in instances)
-                    {
-                        DrawPingableButton(target, null);
-                    }
-                    EditorGUI.indentLevel--;
-                }
-            }
+            DrawTargetObject(ungrouped[i]);
         }
     }
 
-    private void DrawPingableButton(UnityEngine.Object target, string typeName)
+    private void DrawTargetObject(UnityEngine.Object target)
     {
         if (target == null) return;
 
-        bool isSO = target is ScriptableObject;
-        string badge = isSO ? "<color=#FFD700>[SO]</color> " : "";
-        string displayName = target.name;
-        string label = string.IsNullOrEmpty(typeName) ? $"↳ {badge}{displayName}" : $"• {badge}{displayName} ({typeName})";
+        string typeName = target.GetType().Name;
+        string objectName = target.name;
 
-        EditorGUILayout.BeginHorizontal();
-        GUILayout.Space(EditorGUI.indentLevel * 14f);
+        // Nesne adı ile sınıf adı aynıysa tekrar etme
+        string label = objectName == typeName ? $"• {objectName}" : $"• {objectName} <color=grey>({typeName})</color>";
+
         var style = new GUIStyle(EditorStyles.linkLabel) { richText = true };
         if (GUILayout.Button(label, style))
         {
-            var pingTarget = (target is Component comp) ? comp.gameObject : target;
+            var pingTarget = (target is Component c) ? c.gameObject : target;
             EditorGUIUtility.PingObject(pingTarget);
             Selection.activeObject = pingTarget;
         }
-        EditorGUILayout.EndHorizontal();
     }
 
-    private void InsertIntoObjectTree(ObjectTreeNode root, string groupPath, UnityEngine.Object target)
+    private void RebuildData()
     {
-        var current = root;
-        if (!string.IsNullOrEmpty(groupPath))
+        _cachedItems.Clear();
+        var map = new Dictionary<string, EventItem>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Database'den al
+        var db = EventDatabase.Instance;
+        if (db != null && db.events != null)
         {
-            string[] parts = groupPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            foreach (var part in parts)
+            foreach (var ev in db.events)
             {
-                if (!current.SubFolders.TryGetValue(part, out var nextNode))
+                if (ev == null || string.IsNullOrEmpty(ev.FullPath)) continue;
+
+                map[ev.FullPath] = new EventItem
                 {
-                    nextNode = new ObjectTreeNode();
-                    current.SubFolders[part] = nextNode;
-                }
-                current = nextNode;
+                    FullPath = ev.FullPath,
+                    Group = ev.group,
+                    Name = ev.eventName,
+                    DataType = ev.ExpectedType,
+                    IsPersistent = ev.isPersistent,
+                    DefaultValue = ev.payload?.GetDefaultRawValue()
+                };
             }
         }
 
-        string typeName = target.GetType().Name;
-        if (!current.ComponentTypes.TryGetValue(typeName, out var list))
+        // 2. Sahnedeki nesneleri tara
+        var behaviours = FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+        foreach (var mb in behaviours)
         {
-            list = new List<UnityEngine.Object>();
-            current.ComponentTypes[typeName] = list;
+            if (mb == null) continue;
+            ScanObject(mb, map);
         }
-        list.Add(target);
+
+        // 3. ScriptableObject dinleyicilerini tara
+        var listenerTypes = TypeCache.GetTypesDerivedFrom<IEventHubListener>();
+        foreach (var type in listenerTypes)
+        {
+            if (type.IsAbstract || !typeof(ScriptableObject).IsAssignableFrom(type)) continue;
+
+            string[] guids = AssetDatabase.FindAssets($"t:{type.Name}");
+            foreach (var guid in guids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                var so = AssetDatabase.LoadAssetAtPath<ScriptableObject>(path);
+                if (so != null) ScanObject(so, map);
+            }
+        }
+
+        _cachedItems.AddRange(map.Values);
     }
 
-    private void SetAllFoldoutsRecursive(EventFolderNode node, string currentPathKey, bool state)
+    private void ScanObject(UnityEngine.Object target, Dictionary<string, EventItem> map)
     {
-        foreach (var (folderName, subNode) in node.SubFolders)
+        Type targetType = target.GetType();
+
+        if (!_typeFieldCache.TryGetValue(targetType, out var fields))
         {
-            string nodeKey = $"{currentPathKey}/{folderName}";
-            _foldoutStates[nodeKey] = state;
-            SetAllFoldoutsRecursive(subNode, nodeKey, state);
+            fields = new List<(FieldInfo, bool, bool)>();
+            foreach (var f in targetType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (f.FieldType != typeof(string)) continue;
+                bool isPub = f.GetCustomAttribute<EventPublisherAttribute>() != null;
+                bool isLis = f.GetCustomAttribute<EventListenerAttribute>() != null;
+                if (isPub || isLis) fields.Add((f, isPub, isLis));
+            }
+            _typeFieldCache[targetType] = fields;
         }
+
+        foreach (var (f, isPub, isLis) in fields)
+        {
+            string channel = f.GetValue(target) as string;
+            if (string.IsNullOrEmpty(channel)) continue;
+
+            if (!map.TryGetValue(channel, out var item))
+            {
+                int slash = channel.LastIndexOf('/');
+                item = new EventItem
+                {
+                    FullPath = channel,
+                    Group = slash >= 0 ? channel.Substring(0, slash) : "",
+                    Name = slash >= 0 ? channel.Substring(slash + 1) : channel,
+                    DataType = typeof(void),
+                    DefaultValue = null
+                };
+                map[channel] = item;
+            }
+
+            if (isPub && !item.Publishers.Contains(target)) item.Publishers.Add(target);
+            if (isLis && !item.Listeners.Contains(target)) item.Listeners.Add(target);
+        }
+    }
+
+    private static string GetFriendlyTypeName(Type type)
+    {
+        if (type == null || type == typeof(void)) return "Void";
+        if (type == typeof(float)) return "Float";
+        if (type == typeof(int)) return "Int";
+        if (type == typeof(bool)) return "Bool";
+        if (type == typeof(string)) return "String";
+        return type.Name;
     }
 }
 #endif

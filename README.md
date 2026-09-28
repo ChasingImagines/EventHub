@@ -2,16 +2,16 @@
 
 Unity için **isimli (string keyed), tip korumalı, durum hafızalı (stateful / blackboard) ve sahneler arası kalıcılık destekli** statik olay veriyolu.
 
-Nesneler birbirine referans tutmak yerine **kanal adı** üzerinden konuşur. Geç abone olan bir dinleyici, kaçırdığı olayın **son değerini** hafızadan okuyabildiği için klasik C# `event` / `UnityEvent` yaklaşımlarındaki "kaçan olay" problemi ortadan kalkar.
+Nesneler birbirine doğrudan referans tutmak yerine **kanal adı** üzerinden konuşur. Geç abone olan bir dinleyici, kaçırdığı olayın **son değerini** hafızadan okuyabildiği için klasik C# `event` / `UnityEvent` yaklaşımlarındaki "kaçan olay" problemi ortadan kalkar.
 
 ```csharp
 // Üretici: CombatAttacker.cs
-EventHub.Raise("Combat/Player/OnTakeDamage", 25, this);
+EventHub.Raise("Combat/Player/OnTakeDamage", 25, this); // sender opsiyoneldir
 
 // Dinleyici: HealthUIController.cs
 EventHub.Subscribe<int>("Combat/Player/OnTakeDamage", OnDamageReceived);
 
-// Geç açılan UI, geçmişteki son değeri anında okur:
+// Geç açılan UI, hafızadaki son değeri anında okur:
 if (EventHub.TryGet<int>("Combat/Player/OnTakeDamage", out int sonHasar)) { /* ... */ }
 ```
 
@@ -23,12 +23,12 @@ if (EventHub.TryGet<int>("Combat/Player/OnTakeDamage", out int sonHasar)) { /* .
 - [Mimari](#mimari)
 - [Kurulum](#kurulum)
 - [Hızlı Başlangıç](#hızlı-başlangıç)
-- [Kanal Tanımlama (EventDatabase)](#kanal-tanımlama-eventdatabase)
+- [Kanal Tanımlama (EventDatabase) & Payload Sistemi](#kanal-tanımlama-eventdatabase--payload-sistemi)
 - [API Referansı](#api-referansı)
-- [Durum ve Kalıcılık](#durum-ve-kalıcılık)
+- [Durum ve Kalıcılık (Blackboard)](#durum-ve-kalıcılık-blackboard)
 - [Sahne Yaşam Döngüsü](#sahne-yaşam-döngüsü)
 - [Editör Araçları](#editör-araçları)
-- [Doğrulama](#doğrulama)
+- [Doğrulama (Persistence Check)](#doğrulama-persistence-check)
 - [Tasarım Kararları](#tasarım-kararları)
 - [Sınırlar ve Notlar](#sınırlar-ve-notlar)
 - [Dosya Yapısı](#dosya-yapısı)
@@ -43,16 +43,17 @@ Klasik yaklaşımlarda üretici ve dinleyici birbirine bağımlıdır:
 - **`UnityEvent`** → yalnızca inspector'da sürükleyip bırakma; kod taraflı, dinamik kanallar için zayıf.
 - **`static event`** → tip güvenliği yok, "kaçan olay" var, ölü abonelik sızıntısı yapar.
 
-EventHub bu üçünü birleştirir:
+EventHub bu problemleri çözer:
 
 | İhtiyaç | EventHub'ın cevabı |
 |---|---|
 | Gevşek bağlılık | İsimli kanallar; üretici ve dinleyici birbirini bilmez |
-| Tip güvenliği | Kanallar tiplidir; editörde yanlış tip abonelik/yayın yakalanır |
+| Tip güvenliği | Kanallar tiplidir; editörde yanlış tip abonelik/yayın renkli uyarılarla yakalanır |
 | Kaçan olay | Kanal "son değer"i hafızada tutar (blackboard) |
-| Ölü abonelikler | `Destroy` olan obje `Raise` sırasında sessizce listeden sökülür |
-| Sahne geçişleri | Sadece geçici (transient) durumlar temizlenir; kalıcı kanallar korunur |
-| Performans | Kanal başına `List<Delegate>`, ters döngü, sıfıra yakın GC alloc |
+| Varsayılan değer | Kanallar başlangıç değeri taşıyabilir (`defaultValue`) |
+| Sahne geçişleri | Kalıcı (`isPersistent`) kanallar RAM'de korunur, geçiciler temizlenebilir |
+| Hızlı Yeniden Adlandırma | `EventReferenceUpdater` ile kanal adı değişince sahne, prefab ve SO referansları otomatik güncellenir |
+| Statik Denetim | `Event Audit` penceresi oyunu başlatmadan eksik/hatalı bağlamaları ve tek tıkla DB'ye ekleme imkanı sunar |
 
 ---
 
@@ -63,22 +64,24 @@ flowchart LR
     A["CombatAttacker<br/>EventPublisher"]
     B["HealthUIController<br/>EventListener"]
     D["DamageAudioEffectSO<br/>EventHubSO"]
-    C["EventHub<br/>abonelikler"]
-    S["EventHub<br/>durum deposu"]
+    C["EventHub<br/>abonelikler (_subscribers)"]
+    S["EventHub<br/>durum deposu (_states)"]
     DB["EventDatabase SO<br/>sozlesme defteri"]
     M["Event Matrix<br/>Editor penceresi"]
+    R["EventReferenceUpdater<br/>Editor Refactoring"]
 
-    A -->|"Raise 25"| C
-    A -->|"Raise 25"| S
-    C -->|"dagitim"| B
-    C -->|"dagitim"| D
-    DB -.->|"tip / kalicilik"| A
-    DB -.->|"tip / kalicilik"| B
-    S -.->|"canli durum"| M
-    C -.->|"canli matris"| M
+    A -->|"Raise / Publish"| C
+    A -->|"Son Değer"| S
+    C -->|"Dagıtım"| B
+    C -->|"Dagıtım"| D
+    DB -.->|"Tip / Kalıcılık / Varsayılan"| A
+    DB -.->|"Tip / Kalıcılık / Varsayılan"| B
+    S -.->|"Canlı Durum"| M
+    C -.->|"Canlı Olaylar"| M
+    DB -.->|"Kanal Taşıma / Yenileme"| R
 ```
 
-**Akış:** `Raise` → (editörde sözleşme denetimi) → durumu güncelle → ters döngüyle dinleyicilere dağıt → ölü delegate'leri buda.
+**Akış:** `Raise` / `Publish` → kanalın son durumunu güncelle (`_states`) → kayıtlı delegasyonları çağır → editörde `OnEventRaisedInEditor` tetikle (Event Matrix canlı izlesin).
 
 ---
 
@@ -87,18 +90,18 @@ flowchart LR
 1. `Assets/Scripts/EventHub/` klasörünü projene kopyala (Runtime + Editor).
 2. **Bağımlılık:** Inspector'da `IEventPayload` tiplerini çok biçimli göstermek için
    [MackySoft.SerializeReferenceExtensions](https://github.com/mackysoft/Unity-SerializeReferenceExtensions) (`SubclassSelector`) gerekir.
-   Bu depoda zaten `Packages/manifest.json` üzerinden UPM git bağımlılığı olarak gelir, elle kurulum gerekmez:
+   Bu depoda zaten `Packages/manifest.json` üzerinden UPM git bağımlılığı olarak gelir:
    ```json
    "com.mackysoft.serializereference-extensions": "https://github.com/mackysoft/Unity-SerializeReferenceExtensions.git?path=Assets/MackySoft/MackySoft.SerializeReferenceExtensions#1.7.0"
    ```
-3. `Assets/Resources/` altında **Create → Architecture → Event Database** ile bir `EventDatabase` asset'i oluştur. (Dosya adı tam olarak `EventDatabase` olmalı; motor `Resources.Load<EventDatabase>("EventDatabase")` ile bulur.)
+3. `Assets/Resources/` altında **Create → Architecture → Event Database** ile bir `EventDatabase` asset'i oluştur. (Dosya adı tam olarak `EventDatabase` olmalıdır; motor `Resources.Load<EventDatabase>("EventDatabase")` ile bulur.)
 
 ---
 
 ## Hızlı Başlangıç
 
 ### 1. Kanal tanımla
-`EventDatabase` asset'inde bir olay ekle: `group = Combat/Player`, `eventName = OnTakeDamage`, `payload = IntPayload`.
+`EventDatabase` asset'inde bir olay ekle: `group = Combat/Player`, `eventName = OnTakeDamage`, `payload = IntPayload` (varsayılan değer atanabilir).
 
 ### 2. Üretici (yayınla)
 
@@ -106,12 +109,15 @@ flowchart LR
 public class CombatAttacker : MonoBehaviour
 {
     [EventPublisher(typeof(int))]
-    [SerializeField] private string damageChannel;   // Inspector: sadece Int kanalları listelenir
+    [SerializeField] private string damageChannel; // Inspector: sadece Int kanalları listelenir
 
     void Update()
     {
         if (Keyboard.current.spaceKey.wasPressedThisFrame)
-            EventHub.Raise(damageChannel, Random.Range(15, 30), this); // sender opsiyonel
+        {
+            // Publish veya Raise kullanılabilir (sender opsiyoneldir)
+            EventHub.Raise(damageChannel, Random.Range(15, 30), this);
+        }
     }
 }
 ```
@@ -136,8 +142,12 @@ public class HealthUIController : MonoBehaviour
 ```csharp
 [EventPublisher(typeof(void))] [SerializeField] private string deathChannel;
 
-EventHub.Raise(deathChannel, sender: this);   // payload yok
+// Yayınlama (sender parametresi isteğe bağlıdır)
+EventHub.Raise(deathChannel, sender: this);
+
+// Dinleme
 EventHub.Subscribe(deathChannel, OnPlayerDied);
+EventHub.Unsubscribe(deathChannel, OnPlayerDied);
 ```
 
 ### 5. ScriptableObject dinleyici
@@ -155,136 +165,172 @@ public class DamageAudioEffectSO : EventHubSO
 }
 ```
 
-`EventHubSO`, play moda girince otomatik `Register()`, çıkarken `Unregister()` yapar. Başka bir SO tabanından türediğin için `EventHubSO` miras alamıyorsan `IEventHubListener` arayüzünü uygula.
+`EventHubSO`, play moda girince otomatik `Register()`, çıkarken `Unregister()` yapar. Başka bir SO tabanından türediğin için `EventHubSO` miras alamıyorsan `IEventHubListener` arayüzünü doğrudan uygulayabilirsin.
 
 ---
 
-## Kanal Tanımlama (EventDatabase)
+## Kanal Tanımlama (EventDatabase) & Payload Sistemi
 
-`EventDatabase` bir **sözleşme defteridir**: hangi kanalın hangi tipi taşıdığını ve kalıcı olup olmadığını ilan eder. Editörde kanal alanlarının açılır listesi bu tiplere göre filtrelenir ve yanlış tip kullanımı anında log'a düşer.
+`EventDatabase` bir **sözleşme defteridir**: hangi kanalın hangi veri tipini taşıdığını, varsayılan değerini ve kalıcı olup olmadığını belirler.
 
-Hazır payload tipleri (`IEventPayload`): `VoidPayload`, `IntPayload`, `FloatPayload`, `StringPayload`, `BoolPayload`, `Vector3Payload`.
+### Payload Mimarisi
 
-Kendi tipini eklemek için:
+Tüm veri tipleri `IEventPayload` arayüzünü ve `EventPayload<T>` generic temel sınıfını kullanır:
+
+- **`VoidPayload`**: Parametresiz sinyal olayları için kullanılır (`DataType = typeof(void)`).
+- **`EventPayload<T>`**: Veri taşıyan olayların taban sınıfıdır. İçerisinde editörden atanabilen `defaultValue` barındırır.
+  - Hazır tipler: `IntPayload`, `FloatPayload`, `BoolPayload`, `StringPayload`, `Vector3Payload`.
+
+### Özel Bir Veri Tipi Eklemek
+
+Projene özel bir veri tipi eklemek tek satırlık bir sınıftan ibarettir:
 
 ```csharp
 [Serializable]
-public class MyStructPayload : IEventPayload
+public struct InventoryItemData
 {
-    public Type DataType => typeof(MyStruct);
-    public string DisplayName => "MyStruct";
+    public int itemId;
+    public int quantity;
 }
+
+[Serializable]
+public class InventoryItemPayload : EventPayload<InventoryItemData> { }
 ```
+
+Artık `EventDatabase` üzerinde `InventoryItemPayload` seçilebilir ve `[EventPublisher(typeof(InventoryItemData))]` ile kullanılabilir!
 
 ---
 
 ## API Referansı
 
+### Olay Yayınlama & Dinleme (Pub / Sub)
+
 | Metot | Açıklama |
 |---|---|
-| `Subscribe<T>(kanal, Action<T>)` | Tipli dinleyici ekler. |
-| `Unsubscribe<T>(kanal, Action<T>)` | Tipli dinleyiciyi çıkarır. |
-| `Subscribe(kanal, Action)` | Parametresiz dinleyici ekler. |
-| `Unsubscribe(kanal, Action)` | Parametresiz dinleyiciyi çıkarır. |
-| `Raise<T>(kanal, payload, sender=null)` | Tipli olay yayınlar + durumu günceller. |
-| `Raise(kanal, sender=null)` | Parametresiz olay yayınlar + durumu günceller. |
-| `HasValue(kanal)` | Kanalda geçerli (tüketilmemiş) durum var mı? |
-| `TryGet<T>(kanal, out T)` | Son değeri güvenle okur. |
-| `Get<T>(kanal, fallback)` | Son değeri okur, yoksa fallback döner. |
-| `Set<T>(kanal, value)` | Dinleyicileri tetiklemeden durumu doğrudan yazar. |
-| `SetValid(kanal, bool)` | Geçerlilik bayrağını ayarlar. |
-| `Invalidate(kanal)` | Durumu "tüketildi" işaretler (`HasValue = false`). |
-| `ResetState(kanal, force=false)` | Kanalı sıfırlar (kalıcıysa `force` gerekir). |
-| `ResetTransientStates()` | Yalnızca geçici durumları sıfırlar. |
-| `ResetAllStates(includePersistent=false)` | Tüm durumları temizler. |
-| `PruneDeadSubscribers()` | Ölü `UnityEngine.Object` aboneliklerini süpürür. |
-| `IsPersistent(kanal)` / `SetPersistent(kanal, bool)` | Kalıcılık sorgusu / çalışma anı geçersiz kılma. |
+| `Publish<T>(channel, data, sender = null)` | Tipli olay yayınlar ve hafızadaki (blackboard) durumunu günceller. |
+| `Publish(channel, sender = null)` | Parametresiz (void) olay yayınlar. |
+| `Raise<T>(channel, data, sender = null)` | `Publish<T>` için pratik alias. |
+| `Raise(channel, sender = null)` | `Publish` için pratik alias. |
+| `Raise<T>(sender, channel, data)` | `(sender, channel, data)` argüman sırasıyla tipli yayın aşırı yüklemesi. |
+| `Subscribe<T>(channel, Action<T> callback)` | Belirtilen kanala tipli dinleyici ekler (`Delegate.Combine`). |
+| `Unsubscribe<T>(channel, Action<T> callback)` | Belirtilen kanaldan tipli dinleyiciyi kaldırır (`Delegate.Remove`). |
+| `Subscribe(channel, Action callback)` | Parametresiz dinleyici ekler. |
+| `Unsubscribe(channel, Action callback)` | Parametresiz dinleyiciyi kaldırır. |
+
+### Hafıza & Durum Yönetimi (Blackboard State)
+
+| Metot | Açıklama |
+|---|---|
+| `TryGet<T>(channel, out T value)` | Kanalın son yayınlanan veya varsayılan değerini tip güvenli okur. |
+| `HasValue(channel)` | Kanalda kayıtlı geçerli bir durum olup olmadığını döner. |
+| `SetState<T>(channel, value, isPersistent = false)` | Dinleyicileri tetiklemeden durumu doğrudan hafızaya yazar. |
+| `TryGetRawState(channel, out object rawValue, out bool hasValue, out bool isPersistent)` | Editör pencereleri veya genel teftiş için ham durum bilgilerini döner. |
+| `Invalidate(channel)` | Kanalın durumunu geçersiz kılar (`HasValue = false`, `Value = null`). |
+| `ClearNonPersistent()` | Yalnızca kalıcı olmayan (`isPersistent == false`) durumları temizler. |
 
 ---
 
-## Durum ve Kalıcılık
+## Durum ve Kalıcılık (Blackboard)
 
-EventHub iki katmanlıdır:
+EventHub iki katmandan oluşur:
 
-1. **Abonelik katmanı** — klasik pub/sub (`_subscriptions`).
-2. **Durum katmanı (blackboard)** — kanal başına son değer + geçerlilik (`_states`).
+1. **Abonelik Katmanı** — `_subscribers` sözlüğü üzerinden delegasyon zinciri.
+2. **Durum Katmanı (Blackboard)** — `_states` sözlüğü üzerinden son değer deposu.
 
 Durum katmanı sayesinde:
+- Geç açılan ekranlar (UI) veya sonradan sahneye giren nesneler olay geçmişini sorgulayabilir (`TryGet`).
+- `SetState` ile aboneleri tetiklemeden durum yazılabilir.
+- `Invalidate` ile durum tüketilmiş olarak işaretlenebilir.
 
-```csharp
-EventHub.TryGet("Combat/Player/OnTakeDamage", out int hp);  // geçmiş değer, şimdi okunabilir
-EventHub.Set("Settings/Volume", 0.8f);                       // yayın yapmadan yaz
-EventHub.Invalidate("UI/ToastReady");                        // "tüketildi" işaretle
-```
+### Kalıcılık (`isPersistent`)
 
-**Kalıcı kanallar** sahne değişiminde silinmez:
-
-```csharp
-EventHub.SetPersistent("Meta/PlayerScore", true);   // çalışma anı geçersiz kılma
-bool kalici = EventHub.IsPersistent("Meta/PlayerScore");
-```
-
-Kalıcılık, `EventDatabase`'deki `isPersistent` bayrağından veya çalışma anında `SetPersistent` ile zorlanabilir. `ResetState`, kalıcı kanalı kazara sıfırlamaya karşı korur (`force: true` ile aşılır).
+`EventDatabase` üzerinde `isPersistent` işaretlenmiş kanallar sahne değişimlerinde korunur. Sahne geçişlerinde `EventHub.ClearNonPersistent()` çağrıldığında yalnızca geçici durumlar silinir; kalıcı kanallar hafızada kalır.
 
 ---
 
 ## Sahne Yaşam Döngüsü
 
-- `[RuntimeInitializeOnLoadMethod]` → hızlı play mode / domain reload kapalıyken statik hafızayı temizler.
-- `SceneManager.sceneUnloaded` → ölü dinleyicileri budar (`PruneDeadSubscribers`) ve **sadece geçici** durumları süpürür (`ResetTransientStates`). Kalıcı kanallar RAM'de kalır.
-- Editörde play modundan çıkışta tüm statik hafıza sıfırlanır.
+- `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]` → Hızlı Play Mode / Domain Reload kapalıyken statik hafızayı (`_subscribers` ve `_states`) otomatik sıfırlar.
+- Sahne geçişlerinde temizlik için projenin sahne yöneticisinden `EventHub.ClearNonPersistent()` çağrılabilir.
 
 ---
 
 ## Editör Araçları
 
-| Araç | Yol | Ne yapar |
-|---|---|---|
-| **Event Database** | `EventDatabase` asset inspector | Kanalları grup ağacı olarak gösterir, arama/filtre, çakışma uyarısı, ekle/sil. |
-| **Event Channel Dropdown** | Diğer inspector alanları | `[EventPublisher]`/`[EventListener]` alanlarında tipe göre filtrelenmiş kanal seçimi. |
-| **Event Matrix** | `Tools → Architecture → Event Matrix` | Canlı matris: kim yayınlıyor, kim dinliyor, kanalın anlık değeri ve kalıcılık durumu. |
-| **Event Audit** | `Tools → Architecture → Event Audit` | Play'e girmeden statik denetim: prefab + ScriptableObject + açık sahnelerdeki tüm bağlamaları veritabanıyla karşılaştırır (boş kanal, tip uyuşmazlığı, çakışma, tanımsız kanal). |
-| **Persistence Check** | `Tools/EventHubChecks/` | Derleme + çalıştırma kontrolü (bkz. [Doğrulama](#doğrulama)). |
+### 1. Event Database Editor (`EventDatabase` Inspector)
+- **Hiyerarşik Grup Ağacı**: `/` karakteri ile otomatik alt klasörler oluşturulur.
+- **Klasör / Grup Sağ Tık Menüsü**:
+  - `➕ Olay Ekle`: Gruba doğrudan yeni olay ekler.
+  - `📁 Alt Grup Aç`: Yeni alt klasör hiyerarşisi oluşturur.
+  - `✏️ Yeniden Adlandır`: Grubu ve bağlı tüm kanalları yeniden adlandırır.
+  - `🗑️ Grubu Sil`: Onay kutusuyla grubu ve içindeki tüm olayları siler.
+- **Olay Kartı Menüsü & Güvenli Silme**: Olay sağ tık veya `⋮` menüsü ile onay pencereli silme.
+- **Inline Payload**: Varsayılan değer (`defaultValue`) doğrudan satır içinde düzenlenir.
+- **Arama & Çakışma Kontrolü**: Yinelenen kanal isimlerini anında tespit eder ve uyarır.
+
+### 2. Event Channel Drawer (`[EventPublisher]`, `[EventListener]`)
+- **Renk Kodlu Durum Bildirimleri**:
+  - 🟨 **Sarı**: Kanal seçilmedi (`[Seçilmedi] -> (Tip)`).
+  - 🟥 **Kırmızı**: Kayıp olay; kanal veritabanından silinmiş veya adı değişmiş (`❌ Kayıp Olay`).
+  - 🟧 **Turuncu**: Tip uyuşmazlığı; kanalın taşıdığı tip ile alanın beklediği tip eşleşmiyor (`❌ Tip Hatası`).
+  - 🟩 **Normal**: Doğru eşleşme; kanal adı, varsa varsayılan değeri (`[Varsayılan: X]`) ve kalıcılık simgesi `💾` görüntülenir.
+- **Gelişmiş Arama Açılır Menüsü (AdvancedDropdown)**:
+  - Hedef tipe göre otomatik filtreleme.
+  - Klasör yapısında gezinme ve hızlı arama çubuğu.
+  - `✕ <Seçimi Temizle>` butonu.
+
+### 3. Event Matrix Window (`Tools → Architecture → Event Matrix`)
+- **Canlı Olay Takibi**: `EventHub.OnEventRaisedInEditor` entegrasyonuyla çalışma anında tetiklenen kanalları anlık izler.
+- **Yayıncı & Dinleyici Tablosu**: Hangi nesne hangi kanala bağlı listelenir.
+- **Hızlı Ping**: Listedeki nesneye tıklanarak sahnede veya Project görünümünde anında bulunması (`EditorGUIUtility.PingObject`) sağlanır.
+- **ScriptableObject Desteği**: `IEventHubListener` uygulayan SO varlıklarını da tarayıp gösterir.
+
+### 4. Event Audit Window (`Tools → Architecture → Event Audit`)
+- **Oyunu Başlatmadan Statik Analiz**: Açık sahneler, prefab'lar ve ScriptableObject'lerdeki tüm `[EventPublisher]` ve `[EventListener]` alanlarını tarar.
+- **Prefab vs Sahne Ayrımı**: Prefab üzerindeki boş kanallar `Uyarı (Warning)` olarak, aktif sahne nesnelerindeki boş kanallar ise `Hata (Error)` olarak raporlanır.
+- **Hızlı Onarım (Quick Fix - "DB'ye Ekle")**: Kodda kullanılmış ancak henüz `EventDatabase`'e eklenmemiş kanalları tespit eder ve tek tıkla doğru veri tipiyle veritabanına ekler.
+
+### 5. Event Reference Updater (`EventReferenceUpdater`)
+- Kod refactoring ve yeniden adlandırma yardımcısı.
+- Bir kanalın adı veya klasör yolu değiştiğinde:
+  - Tüm açık sahnelerdeki MonoBehaviour'ları,
+  - Projedeki tüm Prefab'ları,
+  - Projedeki tüm ScriptableObject'leri,
+  otomatik tarar ve eski kanal yolunu yeni yolla güncelleyip asset'leri kaydeder.
+- Kullanım:
+  ```csharp
+  EventReferenceUpdater.UpdateAllReferences("OldGroup/OldEvent", "NewGroup/NewEvent");
+  ```
 
 ---
 
-## Doğrulama
+## Doğrulama (Persistence Check)
 
-Depoda çalıştırılabilir bir kontrol vardır:
+EventHub'ın runtime derleme ve kalıcılık mantığını doğrulamak için harici script mevcuttur:
 
 ```bash
 Tools/EventHubChecks/run_persistence_check.sh
 ```
 
-Çıktı: `ALL OK` veya `FAIL` satırları. Unity'nin ürettiği `.csproj`'a bağımlı değildir; EventHub runtime
-kaynaklarını doğrudan derler. Kritik özellik: derleme **`UNITY_EDITOR` tanımlı olmadan** yapılır, yani
-player build derlemesini de taklit eder. Editörde `UNITY_EDITOR` her zaman tanımlı olduğu için
-"guard içinde tanımlı, dışında kullanılan" üyeler Unity'de görünmez ve build'de kırılır; bu script onu yakalar.
-
-Kapsam: kalıcılık geçersiz kılmaları, `Set` sırasında durum tipi değişimi, `ResetTransientStates`
-davranışı. Görsel/etkileşimli doğrulama için `Event Audit` penceresi ve Unity konsolu kullanılır.
+- **Özellik**: `UNITY_EDITOR` sembolü olmadan derleme yapar; böylece player build ortamında kodun derlenip derlenmediğini (smoke test) doğrular.
+- **Kapsam**: `SetState`, `TryGetRawState`, `ClearNonPersistent`, `HasValue`, `TryGet` kontrollerini çalıştırır.
 
 ---
 
 ## Tasarım Kararları
 
-- **`List<Delegate>`, multicast delegate yerine:** kanal bazında anlık silme ve düşük GC alloc.
-- **Ters döngü ile dağıtım:** dinleyici kendini listeden çıkarırken index kayması olmaz.
-- **Ölü obje zırhı:** `Destroy` edilmiş `UnityEngine.Object` abonelikleri dağıtım sırasında sessizce sökülür.
-- **İstisna kalkanı:** bir dinleyici hata fırlatsa bile diğerleri çalışmaya devam eder (`try/catch` + `LogException`).
-- **Void ve generic ayrımı:** parametresiz olaylar boxing yapmaz, ayrı tip-güvenli yol.
-- **Sözleşme denetimi yalnızca editörde:** yayın/abonelik sırasında veritabanıyla tip karşılaştırması yapılır; build'de sıfır maliyet. Editör-only kod (`#if UNITY_EDITOR`) yalnızca çağrı yerleri de guard'lıysa kullanılır; korumasız çağrı player build'i kırar.
-- **Liste serileştirilir, aramalar sözlükte:** `EventDatabase.events` düz `List` olarak kalır (Unity `Dictionary` serialize edemez); aramalar için `FullPath → tanım` indeksi ilk kullanımda kurulur ve liste değiştiğinde kendini yeniler. Böylece inspector, sıralama ve çakışma tespiti korunurken arama `O(1)` olur.
+- **Sade & Hızlı Delegasyon**: Standart C# multicast delegasyon (`Delegate.Combine` / `Delegate.Remove`) ve `Dictionary<string, Delegate>` ile sadeleştirilmiş, performanslı yapı.
+- **Generic Payload Tabanı**: `EventPayload<T>` sınıfı ile tüm veri tiplerine şablon oluşturma ve başlangıç değeri (`defaultValue`) sağlama imkanı.
+- **Editör Merkezli Güvenlik**: String anahtarların kırılganlığı `EventChannelDrawer`, `EventAuditWindow` ve `EventReferenceUpdater` ile bertaraf edilmiştir.
+- **Editör Canlı Dinleme Kancası**: `#if UNITY_EDITOR` korumalı `OnEventRaisedInEditor` sayesinde editör araçları motor performansını etkilemeden olayları dinler.
 
 ---
 
 ## Sınırlar ve Notlar
 
-- Kanal anahtarları **string**'dir; derleme zamanında doğrulanmaz. Güvenlik **editörde** kurulur: kanal alanları `[EventPublisher]`/`[EventListener]` ile tipe göre filtrelenmiş açılır listeden seçilir ve `Event Audit` yanlış bağlamaları build almadan yakalar. Kanal sabitleri üretmek kasıtlı olarak tercih edilmez; amaç kanal seçiminin koddan değil inspector'dan yapılmasıdır.
-- `EventDatabase` içinde aynı yol birden fazla tanımlıysa **ilki** geçerlidir (sözlük indeksi ilk kaydı tutar). Böyle bir çakışma sessizce yutulmaz; `Event Audit` "çakışma" olarak raporlar.
-- `Event Audit` yalnızca **prefab'ları, ScriptableObject'leri ve o an açık olan sahneleri** tarar; kapalı sahne dosyaları kapsam dışıdır (dosyayı bozmadan okumanın güvenli bir yolu yok). Ayrıca bir kanalın "kullanılmıyor" görünmesi problem değildir: obje henüz spawn olmamış veya bilerek bağlanmamış olabilir.
-- Sistem **tek bir global static** hub'dır; birden çok izole bus veya test izolasyonu hedeflenmemiştir.
-- `SetPersistent` geçersiz kılmaları editör play modundan çıkışta temizlenir.
+- Kanal anahtarları string tabanlıdır; yanlış yazımları önlemek için alanlarda `[EventPublisher]` / `[EventListener]` öznitelikleri kullanılmalıdır.
+- `Event Audit` o an açık olan sahneleri, prefab'ları ve ScriptableObject'leri tarar; kapalı sahne dosyaları taranmaz.
+- Sistem küresel bir statik veriyoludur.
 
 ---
 
@@ -293,26 +339,27 @@ davranışı. Görsel/etkileşimli doğrulama için `Event Audit` penceresi ve U
 ```
 Assets/Scripts/EventHub/
 ├── Runtime/
-│   ├── EventHub.cs            # Çekirdek motor (static)
-│   ├── EventDatabase.cs       # Sözleşme defteri (ScriptableObject)
-│   ├── IEventPayload.cs       # Payload tip tanımları
-│   ├── EventAttributes.cs     # [EventPublisher] / [EventListener]
-│   ├── EventGroup.cs          # Sahne hiyerarşisinden kanal grubu
-│   ├── EventHubSO.cs          # SO dinleyici iskeleti
-│   └── IEventHubListener.cs   # SO/sınıf dinleyici arayüzü
+│   ├── EventHub.cs               # Çekirdek motor ve Blackboard (static)
+│   ├── EventDatabase.cs          # Olay sözleşme defteri (ScriptableObject)
+│   ├── IEventPayload.cs          # EventPayload<T> ve temel tip tanımları
+│   ├── EventAttributes.cs        # [EventPublisher] ve [EventListener]
+│   ├── EventGroup.cs             # Sahne hiyerarşisi kanal grubu
+│   ├── EventHubSO.cs             # SO dinleyicileri için temel sınıf
+│   └── IEventHubListener.cs      # SO dinleyici arayüzü
 ├── Editor/
-│   ├── EventChannelDrawer.cs   # Tipli kanal açılır menüsü
-│   ├── EventMatrixWindow.cs    # Canlı olay matrisi
-│   ├── EventDatabaseEditor.cs  # Gruplu, aranabilir veritabanı inspector'ı
-│   └── EventAuditWindow.cs     # Play'siz statik bağlama denetimi
+│   ├── EventChannelDrawer.cs      # Renk kodlu, filtreli açılır kanal seçici
+│   ├── EventMatrixWindow.cs       # Canlı olay ve durum matrisi
+│   ├── EventDatabaseEditor.cs     # Klasör sağ tık, inline payload, silme onaylı DB editörü
+│   ├── EventAuditWindow.cs        # Statik bağlama denetimi ve Quick Fix ("DB'ye Ekle")
+│   └── EventReferenceUpdater.cs   # Sahne/Prefab/SO referans güncelleme aracı
 └── Test/
-    ├── CombatAttacker.cs      # Örnek üretici
-    ├── HealthUIController.cs  # Örnek MonoBehaviour dinleyici
-    └── DamageAudioEffectSO.cs # Örnek ScriptableObject dinleyici
+    ├── CombatAttacker.cs         # Örnek üretici bileşen
+    ├── HealthUIController.cs     # Örnek dinleyici ve geç abone olma örneği
+    └── DamageAudioEffectSO.cs    # Örnek ScriptableObject dinleyicisi
 
 Tools/EventHubChecks/
-├── PersistenceCheck.cs           # Çalıştırılabilir kalıcılık kontrolü
-└── run_persistence_check.sh      # Derler ve çalıştırır (UNITY_EDITOR'siz)
+├── PersistenceCheck.cs           # Runtime kalıcılık ve build smoke testi
+└── run_persistence_check.sh      # Bağımsız derleme ve çalıştırma betiği
 ```
 
 ---

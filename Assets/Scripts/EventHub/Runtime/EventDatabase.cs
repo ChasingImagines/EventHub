@@ -8,8 +8,8 @@ public class EventDatabase : ScriptableObject
     [Serializable]
     public class EventDefinition
     {
-        public string group;
-        public string eventName;
+        public string group = "";
+        public string eventName = "";
 
         [Tooltip("İşaretlenirse bu kanalın son değeri sahne değişimlerinde silinmez (RAM'de korunur).")]
         public bool isPersistent = false;
@@ -23,8 +23,6 @@ public class EventDatabase : ScriptableObject
 
     public List<EventDefinition> events = new();
 
-    // Serileştirilen veri yukarıdaki liste olarak kalır (Unity Dictionary serialize edemez).
-    // Aramalar için listenin türevi bir indeks, ilk kullanımda kurulur ve liste değişince yenilenir.
     private Dictionary<string, EventDefinition> _index;
     private int _indexCount = -1;
 
@@ -36,11 +34,11 @@ public class EventDatabase : ScriptableObject
 
             _index = new Dictionary<string, EventDefinition>(events.Count);
             _indexCount = events.Count;
-            foreach (var e in events)
+            for (int i = 0; i < events.Count; i++)
             {
-                string path = e.FullPath ?? "";   // null anahtar Dictionary'de exception atar
-                // List.Find ile aynı davranış: aynı yol birden fazla tanımlıysa ilki kazanır.
-                if (!_index.ContainsKey(path)) _index[path] = e;
+                var def = events[i];
+                string path = def.FullPath ?? "";
+                if (!_index.ContainsKey(path)) _index[path] = def;
             }
             return _index;
         }
@@ -62,25 +60,29 @@ public class EventDatabase : ScriptableObject
         }
     }
 
+    public bool TryGetDefinition(string fullPath, out EventDefinition def)
+    {
+        return Index.TryGetValue(fullPath ?? "", out def);
+    }
+
     public Type GetExpectedType(string fullPath)
     {
-        return Index.TryGetValue(fullPath ?? "", out var match) ? match.ExpectedType : typeof(void);
+        return Index.TryGetValue(fullPath ?? "", out var def) ? def.ExpectedType : typeof(void);
     }
 
     public bool TryGetExpectedType(string fullPath, out Type expectedType)
     {
-        if (!Index.TryGetValue(fullPath ?? "", out var match))
+        if (Index.TryGetValue(fullPath ?? "", out var def))
         {
-            expectedType = typeof(void);
-            return false;
+            expectedType = def.ExpectedType;
+            return true;
         }
-
-        expectedType = match.ExpectedType;
-        return true;
+        expectedType = typeof(void);
+        return false;
     }
 
     public bool IsPersistent(string fullPath)
     {
-        return Index.TryGetValue(fullPath ?? "", out var match) && match.isPersistent;
+        return Index.TryGetValue(fullPath ?? "", out var def) && def.isPersistent;
     }
 }

@@ -13,20 +13,40 @@ MonoBehaviour:
   m_Name: EventDatabase
   m_EditorClassIdentifier: Assembly-CSharp::EventDatabase
   events:
+  - group: Deneme
+    eventName: YeniOlay
+    isPersistent: 0
+    payload:
+      rid: 1516638402016968804
   - group: Combat/Player
     eventName: OnTakeDamage
+    isPersistent: 0
     payload:
-      rid: 1516638011689533707
+      rid: 1516638402016968805
   - group: Combat/Player
     eventName: OnDeath
+    isPersistent: 0
     payload:
-      rid: 1516638011689533708
+      rid: 1516638402016968789
+  - group: Combat/Player
+    eventName: deneme
+    isPersistent: 1
+    payload:
+      rid: 1516638402016968788
   references:
     version: 2
     RefIds:
-    - rid: 1516638011689533707
-      type: {class: IntPayload, ns: , asm: Assembly-CSharp}
-      data: 
-    - rid: 1516638011689533708
+    - rid: 1516638402016968788
+      type: {class: FloatPayload, ns: , asm: Assembly-CSharp}
+      data:
+        defaultValue: 0
+    - rid: 1516638402016968789
       type: {class: VoidPayload, ns: , asm: Assembly-CSharp}
       data: 
+    - rid: 1516638402016968804
+      type: {class: VoidPayload, ns: , asm: Assembly-CSharp}
+      data: 
+    - rid: 1516638402016968805
+      type: {class: IntPayload, ns: , asm: Assembly-CSharp}
+      data:
+        defaultValue: 0

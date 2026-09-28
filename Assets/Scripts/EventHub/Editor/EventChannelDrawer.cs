@@ -19,48 +19,59 @@ public class EventChannelDrawer : PropertyDrawer
         Type targetType = channelAttr?.ExpectedType ?? typeof(void);
 
         var db = EventDatabase.Instance;
-        if (db == null || db.events.Count == 0)
+        if (db == null)
         {
-            EditorGUI.HelpBox(position, "EventDatabase bulunamadı!", MessageType.Warning);
+            EditorGUI.HelpBox(position, "⚠ EventDatabase asset'i bulunamadı! (Resources/EventDatabase)", MessageType.Warning);
             return;
         }
 
         string currentVal = property.stringValue;
         bool isEmpty = string.IsNullOrEmpty(currentVal);
-        bool exists = db.TryGetExpectedType(currentVal, out Type currentDbType);
+        bool exists = db.TryGetDefinition(currentVal, out var definition);
+        Type currentDbType = exists ? definition.ExpectedType : null;
 
-        // Hata durumları
+        // Validasyon / Hata Durumları
         bool isMissing = !isEmpty && !exists;
         bool isTypeMismatch = !isEmpty && exists && currentDbType != targetType;
 
         Color originalBg = GUI.backgroundColor;
         string displayLabel;
+        string tooltipText = "";
 
         if (isEmpty)
         {
-            GUI.backgroundColor = new Color(1f, 0.9f, 0.4f); // Boş bırakılmışsa sarı dikkat uyarısı
-            displayLabel = $"⚠ Event Seçilmedi! [{targetType.Name}]";
+            GUI.backgroundColor = new Color(1f, 0.88f, 0.4f); // Boş: Sarı uyarı
+            displayLabel = $"[Seçilmedi] -> ({targetType.Name})";
+            tooltipText = "Lütfen bir olay kanalı seçin.";
         }
         else if (isMissing)
         {
-            GUI.backgroundColor = new Color(1f, 0.3f, 0.3f); // DB'den silinmişse kırmızı
+            GUI.backgroundColor = new Color(1f, 0.4f, 0.4f); // DB'de yok: Kırmızı
             displayLabel = $"❌ Kayıp Olay: '{currentVal}'";
+            tooltipText = "Bu kanal EventDatabase'den silinmiş veya adı değiştirilmiş!";
         }
         else if (isTypeMismatch)
         {
-            GUI.backgroundColor = new Color(1f, 0.4f, 0.4f); // Tip uyuşmazlığı
-            displayLabel = $"❌ Tip Hatası: {currentVal} (Beklenen: {targetType.Name})";
+            GUI.backgroundColor = new Color(1f, 0.45f, 0.2f); // Tip uyuşmazlığı: Turuncu
+            string actualTypeName = currentDbType != null ? currentDbType.Name : "Bilinmiyor";
+            displayLabel = $"❌ Tip Hatası: {currentVal} ({actualTypeName} != {targetType.Name})";
+            tooltipText = $"Bu kanal '{actualTypeName}' taşıyor ancak alan '{targetType.Name}' bekliyor!";
         }
         else
         {
-            displayLabel = $"{currentVal} [{targetType.Name}]";
+            // Başarılı eşleşme: Varsa varsayılan değeri de göster
+            object defVal = definition?.payload?.GetDefaultRawValue();
+            string valSuffix = defVal != null ? $" [Varsayılan: {defVal}]" : "";
+            displayLabel = $"{currentVal}{valSuffix}";
+            tooltipText = $"Kanal: {currentVal}\nTip: {targetType.Name}\nKalıcı mı: {(definition.isPersistent ? "Evet (💾)" : "Hayır")}";
         }
 
+        // Label ve Buton ayrımı
         position = EditorGUI.PrefixLabel(position, label);
 
-        if (EditorGUI.DropdownButton(position, new GUIContent(displayLabel), FocusType.Keyboard))
+        var buttonContent = new GUIContent(displayLabel, tooltipText);
+        if (EditorGUI.DropdownButton(position, buttonContent, FocusType.Keyboard))
         {
-            // Asenkron referans kaybını önlemek için SerializedObject ve path'i sabitle
             SerializedObject targetSerializedObject = property.serializedObject;
             string propertyPath = property.propertyPath;
 
@@ -93,47 +104,61 @@ public class EventSearchDropdown : AdvancedDropdown
         _db = db;
         _filterType = filterType;
         _onSelect = onSelect;
-        minimumSize = new Vector2(280, 320);
+        minimumSize = new Vector2(300, 340);
     }
 
     protected override AdvancedDropdownItem BuildRoot()
     {
-        var root = new AdvancedDropdownItem($"Olaylar ({_filterType.Name})");
+        string rootTitle = _filterType == typeof(void) ? "Parametresiz Olaylar (Void)" : $"Olaylar ({_filterType.Name})";
+        var root = new AdvancedDropdownItem(rootTitle);
 
-        // 1. Seçimi Temizleme Seçeneği
-        root.AddChild(new EventDropdownItem("<Hiçbiri / Temizle>", ""));
+        // 1. Temizleme seçeneği
+        root.AddChild(new EventDropdownItem("✕ <Seçimi Temizle>", ""));
 
         int matchingCount = 0;
 
-        foreach (var evt in _db.events)
+        if (_db.events != null)
         {
-            // Sadece beklenen tipe uyan event'leri menüye ekle
-            if (evt.ExpectedType != _filterType) continue;
-
-            matchingCount++;
-            string fullPath = evt.FullPath;
-            string[] parts = fullPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            AdvancedDropdownItem currentParent = root;
-
-            for (int i = 0; i < parts.Length - 1; i++)
+            for (int e = 0; e < _db.events.Count; e++)
             {
-                string folder = parts[i];
-                var child = FindChild(currentParent, folder);
-                if (child == null)
-                {
-                    child = new AdvancedDropdownItem(folder);
-                    currentParent.AddChild(child);
-                }
-                currentParent = child;
-            }
+                var evt = _db.events[e];
+                if (evt == null || evt.ExpectedType == null) continue;
 
-            var leaf = new EventDropdownItem(parts[^1], fullPath);
-            currentParent.AddChild(leaf);
+                // Tip filtresi: Sadece hedef tipi taşıyanları listele
+                if (evt.ExpectedType != _filterType) continue;
+
+                matchingCount++;
+                string fullPath = evt.FullPath;
+                if (string.IsNullOrEmpty(fullPath)) continue;
+
+                string[] parts = fullPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                AdvancedDropdownItem currentParent = root;
+
+                // Hiyerarşik klasör yapısı
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    string folder = parts[i];
+                    var child = FindChild(currentParent, folder);
+                    if (child == null)
+                    {
+                        child = new AdvancedDropdownItem(folder);
+                        currentParent.AddChild(child);
+                    }
+                    currentParent = child;
+                }
+
+                // Olay yaprağı (Varsayılan değer bilgisiyle)
+                object defVal = evt.payload?.GetDefaultRawValue();
+                string leafName = parts[^1] + (defVal != null ? $"  ({defVal})" : "") + (evt.isPersistent ? " 💾" : "");
+
+                var leaf = new EventDropdownItem(leafName, fullPath);
+                currentParent.AddChild(leaf);
+            }
         }
 
         if (matchingCount == 0)
         {
-            root.AddChild(new AdvancedDropdownItem($"[Uygun {_filterType.Name} tipinde olay yok]") { enabled = false });
+            root.AddChild(new AdvancedDropdownItem($"[Uygun '{_filterType.Name}' tipinde olay bulunamadı]") { enabled = false });
         }
 
         return root;
@@ -141,6 +166,7 @@ public class EventSearchDropdown : AdvancedDropdown
 
     private AdvancedDropdownItem FindChild(AdvancedDropdownItem parent, string name)
     {
+        if (parent.children == null) return null;
         foreach (var child in parent.children)
         {
             if (child.name == name) return child;
